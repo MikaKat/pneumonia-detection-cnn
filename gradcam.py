@@ -9,9 +9,9 @@ from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
 from data import transform
-from model import build_model
+from model.model import build_model
 
-CHECKPOINT_PATH = "best_model.pth"
+CHECKPOINT_PATH = "checkpoints/best_model.pth"
 TEST_DIR = "data/chest_xray/test"
 CLASSES = ["NORMAL", "PNEUMONIA"]
 N_PER_CLASS = 3

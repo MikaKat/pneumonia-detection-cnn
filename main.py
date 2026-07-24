@@ -36,12 +36,12 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 
 # Wiederverwendung deiner bestehenden Module
 from data import transform
-from model import build_model
+from model.model import build_model
 
 # --------------------------------------------------------------------------
 # Konfiguration (per Umgebungsvariable überschreibbar)
 # --------------------------------------------------------------------------
-CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "best_model.pth")
+CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "checkpoints/best_model.pth")
 TEST_DIR = os.getenv("TEST_DIR", "data/chest_xray/test")
 CLASSES = ["NORMAL", "PNEUMONIA"]
 THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))       # Entscheidungsschwelle für PNEUMONIA

@@ -1,5 +1,5 @@
 # Backend-Container: FastAPI + PyTorch (CPU) + Grad-CAM.
-# Baut auf dem Repo-Root auf (dort liegen main.py, model.py, data.py, best_model.pth).
+# Baut auf dem Repo-Root auf (dort liegen main.py, model/, data.py, checkpoints/).
 FROM python:3.10-slim
 
 # System-Bibliotheken, die OpenCV (Abhängigkeit von grad-cam) braucht
@@ -18,8 +18,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Anwendungscode + Modellgewichte + Beispielbilder
-COPY model.py data.py main.py ./
-COPY best_model.pth ./
+COPY model/ ./model/
+COPY data.py main.py ./
+COPY checkpoints/best_model.pth ./checkpoints/
 COPY samples ./samples
 
 # In Produktion die kleinen Beispielbilder statt des großen Datensatzes nutzen

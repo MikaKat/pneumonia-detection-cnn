@@ -1,4 +1,4 @@
-"""Trainiert das Modell und speichert die beste Version (nach Val Loss) als best_model.pth.
+"""Trainiert das Modell und speichert die beste Version (nach Val Loss) als checkpoints/best_model_v3.pth.
 
 Achtung: rechenintensiv (mehrere Minuten pro Epoche auf der CPU) - nur ausführen,
 wenn wirklich neu trainiert werden soll. Für Auswertung/Experimente: evaluate.py nutzen,
@@ -11,11 +11,11 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from data import get_data_loaders
-from model import build_model
+from model.model import build_model
 
 NUM_EPOCHS = 5
 LEARNING_RATE = 0.001
-CHECKPOINT_PATH = "best_model.pth"
+CHECKPOINT_PATH = "checkpoints/best_model_v3.pth"   # v3 = CLAHE + per-Bild-Norm + Rebalancing; v2/baseline bleiben
 
 
 def train():
