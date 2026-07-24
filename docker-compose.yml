@@ -1,0 +1,32 @@
+# Bindet Backend (Python/Modell) und Web (UI + nginx) zusammen.
+# Der Browser spricht NUR mit "web". "web" reicht /api intern an "backend" weiter.
+# backend hat KEINEN veröffentlichten Port -> von außen nicht erreichbar.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      THRESHOLD: "0.5"
+      RATE_LIMIT: "10"        # max. Analysen pro Client
+      RATE_WINDOW: "3600"     # pro Stunde
+    # RAM-Deckel, damit das Modell den kleinen Server nicht sprengt.
+    # (Braucht Compose v2 / "docker compose"; bei älterem Compose s. Guide.)
+    deploy:
+      resources:
+        limits:
+          memory: 900M
+
+  web:
+    build:
+      context: ./webapp
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      API_UPSTREAM: "http://backend:8000"   # nginx leitet /api hierhin weiter
+    ports:
+      - "80:80"
+    depends_on:
+      - backend

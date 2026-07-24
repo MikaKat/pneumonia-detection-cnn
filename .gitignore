@@ -2,4 +2,9 @@ venv/
 __pycache__/
 *.pyc
 data/
-best_model.pth
+
+# best_model.pth is NOT ignored: the web app / Docker build needs it.
+# ~44 MB is fine for GitHub/GitLab (hard limit 100 MB). If you'd rather keep
+# large binaries out of normal git history, use Git LFS instead (see BACKEND_GUIDE.md).
+BACKEND_GUIDE.md
+API_CONTRACT.md

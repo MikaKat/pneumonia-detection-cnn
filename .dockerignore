@@ -1,0 +1,9 @@
+# Alles Große/Unnötige aus dem Build-Kontext des Backends heraushalten
+venv/
+__pycache__/
+*.pyc
+data/
+webapp/node_modules/
+webapp/dist/
+gradcam_grid.png
+.git/
