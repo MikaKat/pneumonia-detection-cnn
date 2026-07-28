@@ -1,8 +1,33 @@
 ################################################################
 # Diagnostik-Lauf: nach_norm
-# Checkpoint: best_model_v3.pth
-# Datum: 2026-07-24 12:05:20
+# Checkpoint: checkpoints/best_model_v3.pth
+# Datum: 2026-07-24 12:27:12
 ################################################################
+
+=== Test 0: Klassifikations-Metriken auf dem Test-Set ===
+Quantitative Leistung (Konfusionsmatrix, Sensitivitaet/Spezifitaet, AUC,
+Youden-Schwellenwert) - damit De-Bias-Effekte auch an harten Zahlen sichtbar werden.
+Konfusionsmatrix (Zeilen=wahr, Spalten=Vorhersage):
+[[167  67]
+ [ 20 370]]
+Sensitivität (Recall PNEU): 0.9487
+Spezifität:                 0.7137
+AUC:                        0.9423
+
+              precision    recall  f1-score   support
+
+      NORMAL       0.89      0.71      0.79       234
+   PNEUMONIA       0.85      0.95      0.89       390
+
+    accuracy                           0.86       624
+   macro avg       0.87      0.83      0.84       624
+weighted avg       0.86      0.86      0.86       624
+
+Bester Schwellenwert (Youden J): 0.8707
+  -> Sensitivität: 0.8538, Spezifität: 0.9060
+Konfusionsmatrix bei diesem Schwellenwert:
+[[212  22]
+ [ 57 333]]
 
 === Test 1: CAM-Vergleich (Grad-CAM / Grad-CAM++ / HiResCAM) ===
 Alle Heatmaps erklaeren die PNEUMONIA-Klasse. Grad-CAM==HiResCAM ist bei

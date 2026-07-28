@@ -3,8 +3,39 @@ __pycache__/
 *.pyc
 data/
 
-# best_model.pth is NOT ignored: the web app / Docker build needs it.
-# ~44 MB is fine for GitHub/GitLab (hard limit 100 MB). If you'd rather keep
-# large binaries out of normal git history, use Git LFS instead (see BACKEND_GUIDE.md).
+# --------------------------------------------------------------------------
+# Gewichte
+# --------------------------------------------------------------------------
+# Ein Checkpoint ist ~44 MB, im Ordner liegen zehn. Sie sind reproduzierbar
+# (Splits, Seed und Skript stehen im Repo), die Ergebnis-CSVs daneben nicht --
+# deshalb bleiben die Zahlen versioniert und die Gewichte draussen.
+*.pth
+# Ausnahme: die Webapp und der Docker-Build laden genau diese Datei.
+# (Sie ist bereits verfolgt; .gitignore wirkt nicht auf verfolgte Dateien --
+# die Zeile steht hier, damit die Absicht sichtbar bleibt.)
+!checkpoints/best_model.pth
+
+# --------------------------------------------------------------------------
+# Zwischenstaende, die sich aus den Gewichten neu rechnen lassen
+# --------------------------------------------------------------------------
+# Roh-Cache der U-Net-Masken (~190 MB nach dem grossen Lauf) und die
+# Grad-CAM-Heatmaps (~29 MB). Die AUSGEWERTETEN Zahlen liegen als CSV daneben
+# und bleiben versioniert -- nur die Rohbloecke fliegen raus.
+*.npz
+
+# --------------------------------------------------------------------------
+# Webapp
+# --------------------------------------------------------------------------
+webapp/node_modules/
+webapp/dist/
+webapp/dist_v8check/
+webapp/vite.config.js.timestamp-*
+
+# --------------------------------------------------------------------------
+# Arbeitsdateien, die nicht in die oeffentliche Fassung gehoeren
+# --------------------------------------------------------------------------
 BACKEND_GUIDE.md
 API_CONTRACT.md
+AGENTS.md
+READMEforMe.md
+_to_delete/

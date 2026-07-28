@@ -13,4 +13,10 @@ pillow>=10.0
 numpy>=1.26
 opencv-python-headless>=4.9    # CLAHE-Preprocessing in data.py (gegen Kontrast-Confounder)
 scikit-learn>=1.3             # data.py importiert train_test_split beim Modul-Load -> Backend braucht es
+scipy>=1.11                    # morphologische Masken-Bereinigung in segmentation/make_masks.py
 grad-cam>=1.5                  # importiert als "pytorch_grad_cam"
+
+# RSNA-Phase (Phase 4): DICOM-Header und -Pixel lesen
+pydicom>=2.4                   # rsna_data.scan_headers, DICOM->PNG-Konvertierung
+pandas>=2.0                    # Label-CSVs und Confounder-Auswertung
+kaggle>=1.6                    # nur fuer den Datensatz-Download, kein Laufzeit-Bedarf

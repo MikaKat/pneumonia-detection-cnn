@@ -36,6 +36,8 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 
 from data import transform, CLAHE, PerImageStandardize, get_data_loaders
+from data_masked import (load_masked_tensor, load_raw_mask,
+                         get_masked_data_loaders)
 from model.model import build_model
 from evaluate import evaluate_model
 
@@ -48,6 +50,7 @@ N_QUANT_PER_CLASS = 100      # Bilder fuer Occlusion/Blur
 N_STATS_PER_CLASS = 200      # Bilder fuer den Statistik-Test
 BORDER_FRAC = 0.15
 BLUR_RADII = [0, 2, 4, 8, 16]
+MASKED = False               # wird in main() aus --masked gesetzt (für v4-Modelle)
 
 
 # ---------------------------------------------------------------------- Helfer
@@ -70,9 +73,22 @@ def sample_files(cls, n):
     return [os.path.join(folder, f) for f in sorted(os.listdir(folder))[:n]]
 
 
+def _tensor_to_rgb(t):
+    """Standardisierten Modell-Input in ein anzeigbares [0,1]-RGB umwandeln
+    (für die CAM-Overlays im maskierten Modus)."""
+    x = t[0].mean(0)
+    x = (x - x.min()) / (x.max() - x.min() + 1e-6)
+    return np.stack([x.numpy()] * 3, axis=-1)
+
+
 def load_tensor(path):
-    img = Image.open(path).convert("RGB")
-    return img, transform(img).unsqueeze(0)
+    """Gibt (anzeige_rgb, modell_input) zurück. Im maskierten Modus (v4) wird die
+    Lungenmaske angewandt, sonst die unmaskierte Phase-1-Pipeline (v3)."""
+    if MASKED:
+        t = load_masked_tensor(path).unsqueeze(0)
+        return _tensor_to_rgb(t), t
+    pil = Image.open(path).convert("RGB")
+    return np.array(pil.resize((224, 224))) / 255.0, transform(pil).unsqueeze(0)
 
 
 @torch.no_grad()
@@ -88,12 +104,14 @@ _to_tensor = transforms.ToTensor()
 _standardize = PerImageStandardize()
 
 
-def blurred_input(pil_img, radius):
-    """Modell-Input mit Blur an der korrekten Pipeline-Stelle:
-    Resize -> CLAHE -> Blur -> ToTensor -> Standardize.
-    So degradiert der Blur wirklich das, was das Modell sieht - CLAHE kann ihn
-    nicht mehr aufschaerfen. radius=0 ist identisch zu data.transform."""
-    x = _clahe(_resize(pil_img))
+def blurred_input(path, radius):
+    """Modell-Input mit Blur an der korrekten Pipeline-Stelle (nach CLAHE).
+    Im maskierten Modus (v4) wird derselbe maskierte Pfad genutzt, damit der
+    Blur-Test fair ist. radius=0 ist identisch zur jeweiligen Trainings-Pipeline."""
+    if MASKED:
+        return load_masked_tensor(path, blur_radius=radius).unsqueeze(0)
+    pil = Image.open(path).convert("RGB")
+    x = _clahe(_resize(pil))
     if radius > 0:
         x = x.filter(ImageFilter.GaussianBlur(radius))
     return _standardize(_to_tensor(x)).unsqueeze(0)
@@ -104,7 +122,10 @@ def test_evaluation(model, say):
     say("\n=== Test 0: Klassifikations-Metriken auf dem Test-Set ===")
     say("Quantitative Leistung (Konfusionsmatrix, Sensitivitaet/Spezifitaet, AUC,")
     say("Youden-Schwellenwert) - damit De-Bias-Effekte auch an harten Zahlen sichtbar werden.")
-    _, _, test_loader, classes = get_data_loaders()
+    if MASKED:
+        _, _, test_loader, classes = get_masked_data_loaders()
+    else:
+        _, _, test_loader, classes = get_data_loaders()
     evaluate_model(model, test_loader, classes, say=say)
 
 
@@ -146,11 +167,10 @@ def _cam_grid(model, methods, targets, outdir, filename):
     row = 0
     for cls in CLASSES:
         for path in sample_files(cls, N_CAM_PER_CLASS):
-            img, t = load_tensor(path)
+            rgb, t = load_tensor(path)
             with torch.no_grad():
                 probs = torch.softmax(model(t), dim=1)[0]
             pred = CLASSES[probs.argmax().item()]
-            rgb = np.array(img.resize((224, 224))) / 255.0
             axes[row, 0].imshow(rgb)
             axes[row, 0].set_title(f"Wahr: {cls}\nTipp: {pred} "
                                    f"(P={probs[PNEUMONIA_IDX]:.2f})", fontsize=9)
@@ -207,6 +227,9 @@ def test_stats(model, outdir, say):
     say("\n=== Test 4: Statistik-Test (Einzelmerkmal-Trennkraft) ===")
     say("Wie gut trennt EINE globale Zahl die Klassen? AUC nahe 0/1 = starker")
     say("Datensatz-Confounder. Merkmal ist bei AUC<0.5 in Pneumonie NIEDRIGER.")
+    say("NEU: 'lung_area' = Anteil segmentierter Lungen-Pixel. Trennt DIESE Zahl")
+    say("die Klassen (AUC weit weg von 0.5), verraet die MASKENFORM die Klasse -")
+    say("ein moeglicher neuer Shortcut durch untersegmentierte Verschattungen.")
 
     def features(img):
         g = np.array(img.convert("L").resize((224, 224))) / 255.0
@@ -219,11 +242,12 @@ def test_stats(model, outdir, say):
         u = ranks[:len(pos)].sum() - len(pos) * (len(pos) + 1) / 2
         return u / (len(pos) * len(neg))
 
-    names = ["mean_intensity", "contrast", "black_frac"]
+    names = ["mean_intensity", "contrast", "black_frac", "lung_area"]
     data = {c: {f: [] for f in names} for c in CLASSES}
     for cls in CLASSES:
         for path in sample_files(cls, N_STATS_PER_CLASS):
             fv = features(Image.open(path))
+            fv["lung_area"] = float(load_raw_mask(path).mean())   # Anteil Lungen-Pixel
             for f in names:
                 data[cls][f].append(fv[f])
 
@@ -255,9 +279,8 @@ def test_blur(model, outdir, say):
     res = {r: {c: [] for c in CLASSES} for r in BLUR_RADII}
     for cls in CLASSES:
         for path in sample_files(cls, N_QUANT_PER_CLASS):
-            img = Image.open(path).convert("RGB")
             for r in BLUR_RADII:
-                res[r][cls].append(pneu_prob(model, blurred_input(img, r)))
+                res[r][cls].append(pneu_prob(model, blurred_input(path, r)))
 
     say(f"\n{'Blur-Radius':<12}{'P(PNEU|NORMAL)':>16}{'P(PNEU|PNEU)':>16}{'Separation':>14}")
     say("-" * 58)
@@ -280,6 +303,36 @@ def test_blur(model, outdir, say):
     say("  -> gespeichert: blur_test.png")
 
 
+# ------------------------------------------------- Test 6: Grad-CAM in der Lunge
+def test_cam_lung_overlap(model, outdir, say):
+    say("\n=== Test 6: Grad-CAM-Lungenüberlappung ===")
+    say("Anteil der Grad-CAM-'Energie', der INNERHALB der Lungenmaske liegt.")
+    say("Hoch = das Modell schaut in die Lunge; niedrig = es schaut woanders")
+    say("(Rand, Weichteile). Genau das soll die Maskierung verbessern. Vergleich")
+    say("v3 (unmaskiert) vs v4 (maskiert): steigt der Anteil deutlich?")
+    cam = GradCAM(model=model, target_layers=[model.layer4[-1]])
+    targets = [ClassifierOutputTarget(PNEUMONIA_IDX)]
+
+    fracs = {c: [] for c in CLASSES}
+    for cls in CLASSES:
+        for path in sample_files(cls, N_QUANT_PER_CLASS):
+            _, t = load_tensor(path)
+            gcam = cam(input_tensor=t, targets=targets)[0]        # [224,224], [0,1]
+            mask = load_raw_mask(path).astype(np.float32)         # anatomisches Ziel
+            total = float(gcam.sum())
+            inside = float((gcam * mask).sum())
+            fracs[cls].append(inside / total if total > 0 else 0.0)
+
+    say(f"\n{'Klasse':<14}{'CAM-Anteil in Lunge':>22}")
+    say("-" * 36)
+    allf = []
+    for c in CLASSES:
+        allf.extend(fracs[c])
+        say(f"{c:<14}{np.mean(fracs[c]):>22.3f}")
+    say(f"{'GESAMT':<14}{np.mean(allf):>22.3f}")
+    say("-" * 36)
+
+
 # ---------------------------------------------------------------------- Runner
 def main():
     parser = argparse.ArgumentParser(description="Modell-Diagnostik, gebuendelt.")
@@ -287,7 +340,12 @@ def main():
                         help="Ordnername unter diagnostics_results/ (Default: Zeitstempel)")
     parser.add_argument("--checkpoint", default="checkpoints/best_model.pth",
                         help="Pfad zum Modell-Checkpoint")
+    parser.add_argument("--masked", action="store_true",
+                        help="Eingabe auf die Lunge maskieren (für v4-Modelle)")
     args = parser.parse_args()
+
+    global MASKED
+    MASKED = args.masked
 
     label = args.label or datetime.now().strftime("%Y%m%d_%H%M%S")
     outdir = os.path.join("diagnostics_results", label)
@@ -301,6 +359,7 @@ def main():
     say("#" * 64)
     say(f"# Diagnostik-Lauf: {label}")
     say(f"# Checkpoint: {args.checkpoint}")
+    say(f"# Eingabe: {'LUNGEN-MASKIERT (v4)' if MASKED else 'unmaskiert (v3)'}")
     say(f"# Datum: {datetime.now():%Y-%m-%d %H:%M:%S}")
     say("#" * 64)
 
@@ -310,6 +369,7 @@ def main():
     test_occlusion(model, outdir, say)
     test_stats(model, outdir, say)
     test_blur(model, outdir, say)
+    test_cam_lung_overlap(model, outdir, say)
 
     report_path = os.path.join(outdir, "report.txt")
     say.save(report_path)
