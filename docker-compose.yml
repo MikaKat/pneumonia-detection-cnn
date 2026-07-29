@@ -22,7 +22,7 @@ services:
   web:
     build:
       context: ./webapp
-      dockerfile: serving/Dockerfile
+      dockerfile: Dockerfile
     restart: unless-stopped
     environment:
       API_UPSTREAM: "http://backend:8000"   # nginx leitet /api hierhin weiter

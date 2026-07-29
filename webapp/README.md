@@ -10,6 +10,14 @@ a few MB of RAM — your **1 GB budget is effectively all for the Python/model s
 - Upload your own chest X-ray (PNG/JPEG) **or** pick one of the server's sample images.
 - Runs the model via the backend and shows the verdict (**pneumonia / no pneumonia**) with
   the probability and the decision threshold.
+- Shows the **processing chain**: one tile per preprocessing step, joined by arrows:
+  uploaded image → lung mask → crop → what the model sees → Grad-CAM. The tiles are not
+  a timed animation; each appears when the backend reports that step finished (see
+  `GET /api/jobs/{id}?since=n` in the contract). Click a tile to enlarge it.
+  Two steps carry an **`explored`** badge: the lung mask and the crop were built and
+  measured in this project and then dropped. The classifier runs on the full image, as
+  it was trained. They are computed for real and shown for real, and labelled so the
+  chain does not claim to be the path the score came out of.
 - Shows the **Grad-CAM heatmap** blended over the original, with an intensity slider.
 - Reflects the backend's **rate limit** (a quota bar) and the **single-worker queue**
   (live "position in queue" while waiting) — see below.
@@ -117,7 +125,11 @@ Typical workflow: develop on `main`, and when you want to ship, merge/fast-forwa
   `evaluate.py`). Report `probability` = softmax prob of index 1.
 - Grad-CAM: target layer `model.layer4[-1]` (as in `gradcam.py`); return the
   `show_cam_on_image` overlay as base64 PNG in `heatmap_png_base64`.
-- Preprocess uploads with the same `transform` from `data.py` (resize 224×224 + ImageNet
-  normalize) before inference.
+- Preprocess uploads with the same `transform` from `data.py` (resize 224×224 + CLAHE +
+  per-image standardisation) before inference.
+- Stage images for the processing chain come from `serving/stages.py`. The lung mask
+  needs `checkpoints/unet_best.pth` and `segmentation/unet.py`; without them the two
+  tiles report `skipped` and everything else still works. `SHOW_STAGES=0` turns the whole
+  chain off (saves ~0.4 s and a few MB per request).
 - Load the model **once at startup** (not per request) to stay within the RAM budget and
   keep the single-worker queue fast.

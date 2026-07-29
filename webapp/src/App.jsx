@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   getHealth,
   getLimits,
+  getPipeline,
   getSamples,
   analyzeFile,
   analyzeSample,
@@ -11,6 +12,7 @@ import { DisclaimerGate, DisclaimerBanner } from "./components/Disclaimer.jsx";
 import { RateLimitBar } from "./components/RateLimitBar.jsx";
 import { ImageSource } from "./components/ImageSource.jsx";
 import { QueueStatus } from "./components/QueueStatus.jsx";
+import { PipelineView } from "./components/PipelineView.jsx";
 import { ResultView } from "./components/ResultView.jsx";
 
 export default function App() {
@@ -25,6 +27,8 @@ export default function App() {
 
   const [jobStatus, setJobStatus] = useState(null); // submitting|queued|processing
   const [jobPosition, setJobPosition] = useState(null);
+  const [pipelinePlan, setPipelinePlan] = useState(null); // static chain description
+  const [stages, setStages] = useState([]);               // stage images as they arrive
   const [result, setResult] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null); // { message, code, reset_at }
 
@@ -52,6 +56,14 @@ export default function App() {
       } catch (e) {
         setSamplesError(e.message);
       }
+      try {
+        const p = await getPipeline();
+        // Only keep the plan if the backend actually produces stage images;
+        // otherwise the chain would sit there with permanent placeholders.
+        setPipelinePlan(p.enabled ? p.stages || [] : []);
+      } catch {
+        setPipelinePlan([]); // older backend without /api/pipeline
+      }
     })();
   }, []);
 
@@ -62,6 +74,7 @@ export default function App() {
     if (!canAnalyze) return;
     setErrorInfo(null);
     setResult(null);
+    setStages([]);
     setPhase("running");
     setJobStatus("submitting");
     setJobPosition(null);
@@ -80,13 +93,15 @@ export default function App() {
 
       const finished = await pollJob(
         submit.job_id,
-        ({ status, position }) => {
+        ({ status, position, stages: arrived }) => {
           setJobStatus(status);
           setJobPosition(position ?? null);
+          if (arrived) setStages(arrived);
         },
         { signal: controller.signal }
       );
 
+      setStages(finished.stages || []);
       setResult(finished.result);
       setPhase("done");
       refreshLimits();
@@ -94,8 +109,12 @@ export default function App() {
       if (e.name === "AbortError") {
         setPhase("idle");
         setJobStatus(null);
+        setStages([]);
         return;
       }
+      // Keep whatever stages made it through - a chain that stops at the step
+      // that failed says more than an empty error box.
+      if (e.stages) setStages(e.stages);
       setErrorInfo({ message: e.message, code: e.code, reset_at: e.reset_at });
       setPhase("error");
       refreshLimits();
@@ -115,6 +134,7 @@ export default function App() {
     }
     setSelection(null);
     setResult(null);
+    setStages([]);
     setErrorInfo(null);
     setJobStatus(null);
     setJobPosition(null);
@@ -192,8 +212,24 @@ export default function App() {
           <QueueStatus status={jobStatus} position={jobPosition} onCancel={handleCancel} />
         )}
 
+        {/* The chain is shown while it fills up and stays afterwards. On an
+            error it shows how far the run got before it stopped. */}
+        {(phase === "running" || phase === "done" || (phase === "error" && stages.length > 0)) &&
+          (stages.length > 0 || (pipelinePlan?.length > 0 && phase === "running")) && (
+            <PipelineView
+              plan={pipelinePlan}
+              stages={stages}
+              running={phase === "running"}
+            />
+          )}
+
         {phase === "done" && result && (
-          <ResultView result={result} originalUrl={selection?.previewUrl} onReset={reset} />
+          <ResultView
+            result={result}
+            stages={stages}
+            originalUrl={selection?.previewUrl}
+            onReset={reset}
+          />
         )}
 
         <footer className="app-footer">

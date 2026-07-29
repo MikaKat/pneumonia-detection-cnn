@@ -19,15 +19,24 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Anwendungscode + Modellgewichte + Beispielbilder
 COPY serving/model/ ./model/
-COPY serving/data.py serving/main.py ./
+COPY serving/data.py serving/main.py serving/stages.py ./
 COPY checkpoints/best_model.pth ./checkpoints/
 COPY serving/samples ./samples
+
+# Segmenter für die Masken-/Crop-Kachel der Pipeline-Ansicht.
+# Nur unet.py wird gebraucht (die Architektur), nicht das ganze Trainingspaket.
+# Fehlen diese beiden Zeilen, läuft die App weiter - die zwei Kacheln melden
+# dann "übersprungen" statt ein Bild zu zeigen (siehe serving/stages.py).
+COPY segmentation/__init__.py segmentation/unet.py ./segmentation/
+COPY checkpoints/unet_best.pth ./checkpoints/
 
 # In Produktion die kleinen Beispielbilder statt des großen Datensatzes nutzen
 ENV TEST_DIR=samples
 ENV THRESHOLD=0.5
 ENV RATE_LIMIT=10
 ENV RATE_WINDOW=3600
+# Vorverarbeitungskette in der Oberfläche zeigen (0 = nur Ergebnis, spart RAM/CPU)
+ENV SHOW_STAGES=1
 
 EXPOSE 8000
 # EIN Worker-Prozess -> zusammen mit dem internen Worker-Thread bleibt es bei

@@ -6,6 +6,7 @@ Setzt den Vertrag aus webapp/API_CONTRACT.md um:
   GET  /api/samples          (+ /api/samples/{id}/thumb)
   POST /api/analyze          (Datei-Upload ODER {"sample_id": ...})
   GET  /api/jobs/{job_id}
+  GET  /api/pipeline         (Beschreibung der Vorverarbeitungskette, ohne Bilder)
 
 Kernideen:
   * EIN einziger Worker-Thread verarbeitet immer nur EIN Bild gleichzeitig.
@@ -14,6 +15,12 @@ Kernideen:
     überlasten - selbst bei 1 GB RAM läuft nie mehr als eine Inferenz parallel.
   * Rate-Limiting im Arbeitsspeicher (pro X-Client-Id, festes Zeitfenster).
   * Das Modell wird EINMAL beim Start geladen, nicht pro Anfrage.
+  * STUFENWEISE AUSGABE: Die Vorverarbeitung wird nicht als Block gerechnet und
+    am Ende ausgeliefert, sondern jede Stufe meldet ihr Bild, sobald es fertig
+    ist (`job["stages"]`). GET /api/jobs/{id} gibt die bereits fertigen Stufen
+    auch im Zustand "processing" zurueck. Dadurch fuellt sich die Kette in der
+    Oberflaeche waehrend der Rechnung - die Pfeile sind echter Fortschritt und
+    keine Animation.
 """
 
 import base64
@@ -35,14 +42,36 @@ from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
 # Wiederverwendung deiner bestehenden Module
+import stages as pipeline_stages
 from data import transform
 from model.model import build_model
 
 # --------------------------------------------------------------------------
 # Konfiguration (per Umgebungsvariable überschreibbar)
 # --------------------------------------------------------------------------
-CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "checkpoints/best_model.pth")
-TEST_DIR = os.getenv("TEST_DIR", "data/chest_xray/test")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve(path: str) -> str:
+    """Pfad relativ zum Arbeitsverzeichnis ODER zum Repo suchen.
+
+    Im Container liegt alles flach neben dieser Datei (`/app`), in der
+    Entwicklung wird der Server aus `serving/` gestartet, waehrend die Ordner
+    `checkpoints/` und `data/` eine Ebene hoeher liegen. Beide Faelle bedienen,
+    statt eine Umgebungsvariable zu verlangen, deren Vergessen als
+    `FileNotFoundError` beim Start endet. Absolute Pfade bleiben unangetastet.
+    """
+    if os.path.isabs(path):
+        return path
+    for base in ("", _HERE, os.path.dirname(_HERE)):
+        candidate = os.path.join(base, path) if base else path
+        if os.path.exists(candidate):
+            return candidate
+    return path                                    # Fehlermeldung nennt das Original
+
+
+CHECKPOINT_PATH = _resolve(os.getenv("CHECKPOINT_PATH", "checkpoints/best_model.pth"))
+TEST_DIR = _resolve(os.getenv("TEST_DIR", "data/chest_xray/test"))
 CLASSES = ["NORMAL", "PNEUMONIA"]
 THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))       # Entscheidungsschwelle für PNEUMONIA
 SAMPLES_PER_CLASS = int(os.getenv("SAMPLES_PER_CLASS", "4"))
@@ -52,18 +81,30 @@ RATE_WINDOW = int(os.getenv("RATE_WINDOW", "3600"))     # Fensterlänge in Sekun
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
 JOB_TTL = int(os.getenv("JOB_TTL", "300"))              # fertige Jobs nach 5 min vergessen
 ALLOWED_TYPES = {"image/png", "image/jpeg"}
+SHOW_STAGES = os.getenv("SHOW_STAGES", "1") not in ("0", "false", "False")
 
 torch.set_num_threads(1)  # begrenzt CPU/RAM auf schwacher Hardware
 
 # --------------------------------------------------------------------------
 # Modell + Grad-CAM einmalig laden
 # --------------------------------------------------------------------------
-print("Lade Modell ...")
+print(f"Lade Modell: {CHECKPOINT_PATH} ...")
 model = build_model(pretrained=False)
-model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location="cpu"))
+# weights_only=True: die Datei enthaelt nur Gewichte, also nicht den ganzen
+# Pickle-Interpreter zulassen. Ab Torch 2.6 ist das ohnehin die Vorgabe.
+model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location="cpu", weights_only=True))
 model.eval()
 cam = GradCAM(model=model, target_layers=[model.layer4[-1]])
 print("Modell geladen.")
+
+# Der Segmenter ist OPTIONAL. Fehlt checkpoints/unet_best.pth, laeuft die
+# Analyse unveraendert weiter, nur die Masken- und Crop-Kachel entfallen.
+if SHOW_STAGES:
+    if pipeline_stages.load_segmenter():
+        print("U-Net (Lungensegmentierung) geladen.")
+    else:
+        print(f"U-Net nicht verfuegbar ({pipeline_stages.segmenter_status()['error']}) - "
+              f"Masken- und Crop-Stufe werden uebersprungen.")
 
 
 def _now_iso(ts: float) -> str:
@@ -78,26 +119,160 @@ def _png_base64(rgb_uint8: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def run_inference(pil_img: Image.Image) -> dict:
-    """Klassifikation + Grad-CAM für ein Bild. Läuft NUR im Worker-Thread."""
+# --------------------------------------------------------------------------
+# Unsicherheit durch Test-Time-Augmentation
+# --------------------------------------------------------------------------
+# Warum ausgerechnet Ausschnitts-Verschiebungen und keine Drehungen oder
+# Helligkeitsaenderungen:
+#   * Die Bild-Normierung (PerImageStandardize) macht Helligkeit und globalen
+#     Kontrast per Konstruktion wirkungslos - eine Helligkeits-Variante wuerde
+#     also garantiert dieselbe Zahl liefern und eine Stabilitaet vortaeuschen,
+#     die nur die Normierung ist.
+#   * Drehungen erzeugen schwarze Ecken. Deren Wirkung auf den Score waere ein
+#     Artefakt der Fuellfarbe, nicht der Anatomie.
+#   * AUSSCHNITT und ZOOM sind dagegen genau der Kanal, der in diesem Projekt
+#     als Confounder nachgewiesen wurde. Die Frage "wie weit wandert der Score,
+#     wenn der Bildausschnitt um zwei Prozent wandert" misst also die
+#     Empfindlichkeit dort, wo sie nachweislich weh tut.
+# Das ist AUSDRUECKLICH kein Konfidenzintervall: es misst die Streuung des
+# Modells gegen kleine Bildaenderungen, nicht die Unsicherheit der Diagnose.
+# Die Oberflaeche beschriftet es genau so.
+TTA_VIEWS = [
+    ("full frame", 1.00, 0.0, 0.0),
+    ("96 % crop", 0.96, 0.0, 0.0),
+    ("92 % crop", 0.92, 0.0, 0.0),
+    ("shifted right/down", 0.96, 0.02, 0.02),
+    ("shifted left/up", 0.96, -0.02, -0.02),
+]
+
+
+def _view(pil_img: Image.Image, frac: float, dx: float, dy: float) -> Image.Image:
+    """Mittiger Ausschnitt der Groesse `frac`, um (dx, dy) verschoben.
+
+    Verschiebung in Anteilen der Bildkante. Der Ausschnitt wird an den Rand
+    geklemmt, damit nie ueber das Bild hinaus geschnitten wird - sonst haette
+    die Variante einen schwarzen Streifen und maesse wieder ein Artefakt.
+    """
+    if frac >= 1.0 and dx == 0.0 and dy == 0.0:
+        return pil_img
+    W, H = pil_img.size
+    w, h = int(W * frac), int(H * frac)
+    left = min(max(int((W - w) / 2 + dx * W), 0), W - w)
+    top = min(max(int((H - h) / 2 + dy * H), 0), H - h)
+    return pil_img.crop((left, top, left + w, top + h))
+
+
+@torch.no_grad()
+def tta_scores(pil_img: Image.Image) -> list[dict]:
+    """Wahrscheinlichkeit je Variante. Erste Variante = unveraendertes Bild."""
+    out = []
+    for name, frac, dx, dy in TTA_VIEWS:
+        t = transform(_view(pil_img, frac, dx, dy)).unsqueeze(0)
+        p = float(torch.softmax(model(t), dim=1)[0][1])
+        out.append({"view": name, "probability": round(p, 4)})
+    return out
+
+
+def run_inference(pil_img: Image.Image, emit=None) -> dict:
+    """Klassifikation + Grad-CAM für ein Bild. Läuft NUR im Worker-Thread.
+
+    `emit(stage_dict)` wird nach JEDER fertigen Stufe aufgerufen, nicht erst am
+    Ende. Der Aufrufer haengt die Stufe unter Lock an den Job an, sodass ein
+    parallel laufendes GET /api/jobs/{id} sie sofort sieht.
+
+    Reihenfolge der Kette (siehe stages.PIPELINE):
+        1. Hochgeladenes Bild
+        2. Lungenmaske (U-Net)             (Entwicklungsstufe, s. stages.py)
+        3. Quadratischer Zuschnitt         (Entwicklungsstufe)
+        4. Modelleingabe 224x224 (CLAHE + Per-Bild-Standardisierung)
+        5. Grad-CAM
+
+    Stufe 2 und 3 sind ausdruecklich NICHT im Wertungspfad: klassifiziert wird
+    das Vollbild, genau so wie trainiert wurde. Sie werden echt gerechnet und
+    als `status: "explored"` gekennzeichnet, damit die Kette nicht mehr behauptet
+    als sie tut.
+    """
     t0 = time.time()
+
+    def _emit(*args, **kwargs):
+        if emit is not None:
+            emit(pipeline_stages.stage(*args, **kwargs))
+
+    def _stage_ms(started):
+        return int((time.time() - started) * 1000)
+
+    if emit is not None:
+        ts = time.time()
+        _emit("upload", pipeline_stages.render_original(pil_img),
+              ms=_stage_ms(ts), size=list(pil_img.size))
+
+        # --- 2 + 3: Maske und Zuschnitt (nur zur Anschauung) -------------
+        mask = None
+        ts = time.time()
+        try:
+            mask = pipeline_stages.lung_mask(pil_img)
+        except Exception as exc:  # noqa: BLE001
+            _emit("mask", None, skipped=True, reason=f"{type(exc).__name__}: {exc}")
+        if mask is not None:
+            _emit("mask", pipeline_stages.render_mask_overlay(pil_img, mask),
+                  ms=_stage_ms(ts))
+        elif pipeline_stages.segmenter_status()["available"]:
+            _emit("mask", None, skipped=True, reason="No lung region found in this image.")
+        else:
+            _emit("mask", None, skipped=True, reason="Segmentation model not available.")
+
+        if mask is not None:
+            ts = time.time()
+            crop_b64, box = pipeline_stages.render_crop(pil_img, mask)
+            _emit("crop", crop_b64, ms=_stage_ms(ts), box=box)
+        else:
+            _emit("crop", None, skipped=True, reason="Needs a lung mask.")
+
+    # --- 4: Modelleingabe --------------------------------------------------
+    ts = time.time()
     input_tensor = transform(pil_img).unsqueeze(0)  # (1, 3, 224, 224)
+    if emit is not None:
+        _emit("model_input", pipeline_stages.render_model_input(input_tensor),
+              ms=_stage_ms(ts))
 
     with torch.no_grad():
         probs = torch.softmax(model(input_tensor), dim=1)[0]
     prob_pneu = float(probs[1])                      # Index 1 = PNEUMONIA (wie in evaluate.py)
-    prediction = "PNEUMONIA" if prob_pneu >= THRESHOLD else "NORMAL"
 
-    # Grad-CAM (braucht Gradienten, daher kein no_grad)
+    # Streuung ueber leicht verschobene Bildausschnitte. Die erste Variante ist
+    # das unveraenderte Bild und liefert dieselbe Zahl wie oben; sie wird
+    # trotzdem mitgerechnet, damit die Liste vollstaendig ist und nicht eine
+    # Zahl aus einem anderen Rechenweg dazwischensteht.
+    views = tta_scores(pil_img)
+    vals = sorted(v["probability"] for v in views)
+    mid = len(vals) // 2
+    median = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+    # --- 5: Grad-CAM (braucht Gradienten, daher kein no_grad) --------------
+    ts = time.time()
     grayscale_cam = cam(input_tensor=input_tensor)[0]
     rgb = np.array(pil_img.resize((224, 224))).astype(np.float32) / 255.0
     overlay = show_cam_on_image(rgb, grayscale_cam, use_rgb=True)  # uint8 RGB
+    heatmap_b64 = _png_base64(overlay)
+    if emit is not None:
+        _emit("heatmap", heatmap_b64, ms=_stage_ms(ts))
 
+    # Ohne Labelfeld, mit Absicht: die Entscheidungsschwelle traegt zwischen
+    # Datensaetzen nicht (NPV 0.500 in der externen Pruefung, siehe README
+    # Abschnitt 6). Ein Label waere genau die Aussage, die dort gescheitert
+    # ist. Wer eines ergaenzen will, muss vorher die Kalibrierung zeigen.
     return {
-        "prediction": prediction,
         "probability": round(prob_pneu, 4),
         "threshold": THRESHOLD,
-        "heatmap_png_base64": _png_base64(overlay),
+        "uncertainty": {
+            "median": round(median, 4),
+            "min": min(vals),
+            "max": max(vals),
+            "spread": round(max(vals) - min(vals), 4),
+            "views": views,
+            "method": "test-time augmentation over small framing changes",
+        },
+        "heatmap_png_base64": heatmap_b64,
         "inference_ms": int((time.time() - t0) * 1000),
     }
 
@@ -181,8 +356,15 @@ def _worker() -> None:
                 continue
             job["status"] = "processing"
             img = job.pop("image")     # Bild aus dem Job herausnehmen und verarbeiten
+
+        def publish(stage: dict, _job=job) -> None:
+            """Eine fertige Stufe an den Job haengen, damit sie sofort abrufbar
+            ist. Kurz gesperrt, weil GET /api/jobs parallel liest."""
+            with jobs_lock:
+                _job.setdefault("stages", []).append(stage)
+
         try:
-            result = run_inference(img)
+            result = run_inference(img, emit=publish if SHOW_STAGES else None)
             with jobs_lock:
                 job["status"] = "done"
                 job["result"] = result
@@ -261,7 +443,12 @@ def _client_id(x_client_id: str | None) -> str:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "model_loaded": True}
+    return {
+        "status": "ok",
+        "model_loaded": True,
+        "stages_enabled": SHOW_STAGES,
+        "segmentation_loaded": pipeline_stages.segmenter_status()["available"],
+    }
 
 
 @app.get("/api/limits")
@@ -347,26 +534,53 @@ async def analyze(request: Request, x_client_id: str | None = Header(default=Non
     return JSONResponse(_enqueue(image), status_code=202)
 
 
+@app.get("/api/pipeline")
+def get_pipeline():
+    """Die Kette ohne Bilder: Titel, Beschriftung und Status je Stufe.
+
+    Damit kann die Oberflaeche die leere Kette samt Pfeilen schon zeichnen,
+    bevor ueberhaupt ein Bild hochgeladen wurde. `status: "explored"` markiert
+    die Stufen, die untersucht und wieder verworfen wurden.
+    """
+    return {
+        "stages": pipeline_stages.PIPELINE,
+        "enabled": SHOW_STAGES,
+        "segmentation": pipeline_stages.segmenter_status(),
+    }
+
+
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, since: int = 0):
+    """`since` = Anzahl der Stufen, die der Client schon hat.
+
+    Ohne diesen Parameter kaeme bei jedem Poll die komplette Bilderkette erneut
+    ueber die Leitung. Der Client zaehlt mit und bekommt nur den Zuwachs.
+    """
     with jobs_lock:
         job = jobs.get(job_id)
         if job is None:
             return JSONResponse({"error": "job_not_found"}, status_code=404)
 
         status = job["status"]
+        all_stages = job.get("stages", [])
+        since = max(0, min(int(since), len(all_stages)))
+        new_stages = list(all_stages[since:])
+        stage_info = {"stages": new_stages, "stages_total": len(all_stages)}
+
         if status == "queued":
-            return {"job_id": job_id, "status": "queued", "position": _position_of(job)}
+            return {"job_id": job_id, "status": "queued", "position": _position_of(job),
+                    **stage_info}
         if status == "processing":
-            return {"job_id": job_id, "status": "processing"}
+            return {"job_id": job_id, "status": "processing", **stage_info}
         if status == "done":
-            return {"job_id": job_id, "status": "done", "result": job["result"]}
+            return {"job_id": job_id, "status": "done", "result": job["result"], **stage_info}
         # error
         return {
             "job_id": job_id,
             "status": "error",
             "error": job.get("error", "inference_failed"),
             "message": job.get("message", "Analysis failed."),
+            **stage_info,
         }
 
 

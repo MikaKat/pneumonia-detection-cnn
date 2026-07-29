@@ -55,6 +55,15 @@ export async function getLimits() {
   return res.json();
 }
 
+// Static description of the preprocessing chain: titles, captions, and which
+// stages are production and which were explored during development and dropped.
+// Fetched once at startup so the empty chain can be drawn before any upload.
+export async function getPipeline() {
+  const res = await fetch(`${BASE}/pipeline`, { headers: headers() });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
 export async function getSamples() {
   const res = await fetch(`${BASE}/samples`, { headers: headers() });
   if (!res.ok) throw await toError(res);
@@ -95,10 +104,13 @@ export async function analyzeSample(sampleId) {
   return res.json();
 }
 
-export async function getJob(jobId) {
-  const res = await fetch(`${BASE}/jobs/${encodeURIComponent(jobId)}`, {
-    headers: headers(),
-  });
+// `since` tells the server how many pipeline stages we already hold, so it only
+// sends the new ones. Without it every poll would re-send the whole image chain.
+export async function getJob(jobId, since = 0) {
+  const res = await fetch(
+    `${BASE}/jobs/${encodeURIComponent(jobId)}?since=${since}`,
+    { headers: headers() }
+  );
   if (res.status === 404) {
     const err = new Error("Result expired or job not found.");
     err.status = 404;
@@ -112,12 +124,19 @@ export async function getJob(jobId) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Polls getJob until status is "done" or "error".
-// onUpdate({status, position}) is called on every poll so the UI can show the queue.
-// Returns the final job object. Throws on error/timeout/abort.
+// onUpdate({status, position, stages}) fires on every poll; `stages` is the full
+// list accumulated so far, so the UI can grow the chain while the job runs.
+// Returns the final job object (with `stages` attached). Throws on error/timeout/abort.
 export async function pollJob(jobId, onUpdate, { signal } = {}) {
   const startedAt = Date.now();
   const MAX_MS = 5 * 60 * 1000; // 5 min hard stop
-  let delay = 1200;
+  const stages = [];
+  // Two cadences: while the job is still waiting its turn there is nothing to
+  // see, so poll lazily. Once it is being processed the stages arrive one by
+  // one and a slow poll would make the chain appear all at once at the end.
+  const QUEUED_START = 1200;
+  const PROCESSING = 400;
+  let delay = QUEUED_START;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -128,18 +147,24 @@ export async function pollJob(jobId, onUpdate, { signal } = {}) {
       throw err;
     }
 
-    const job = await getJob(jobId);
-    onUpdate?.({ status: job.status, position: job.position });
+    const job = await getJob(jobId, stages.length);
+    if (Array.isArray(job.stages) && job.stages.length) stages.push(...job.stages);
+    onUpdate?.({ status: job.status, position: job.position, stages: [...stages] });
 
-    if (job.status === "done") return job;
+    if (job.status === "done") return { ...job, stages: [...stages] };
     if (job.status === "error") {
       const err = new Error(job.message || "Analysis failed.");
       err.code = job.error || "inference_failed";
+      err.stages = [...stages];
       throw err;
     }
 
     await sleep(delay);
-    // Gentle backoff while queued so we don't hammer the server; cap at 3s.
-    delay = Math.min(delay + 300, 3000);
+    if (job.status === "processing") {
+      delay = PROCESSING;
+    } else {
+      // Gentle backoff while queued so we don't hammer the server; cap at 3s.
+      delay = Math.min(delay + 300, 3000);
+    }
   }
 }
