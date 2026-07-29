@@ -1,6 +1,7 @@
 # Bindet Backend (Python/Modell) und Web (UI + nginx) zusammen.
 # Der Browser spricht NUR mit "web". "web" reicht /api intern an "backend" weiter.
-# backend hat KEINEN veröffentlichten Port -> von außen nicht erreichbar.
+# Keiner der beiden Dienste veroeffentlicht einen Host-Port: erreichbar ist die
+# Anwendung ausschliesslich ueber den Reverse Proxy davor.
 
 services:
   backend:
@@ -26,7 +27,14 @@ services:
     restart: unless-stopped
     environment:
       API_UPSTREAM: "http://backend:8000"   # nginx leitet /api hierhin weiter
-    ports:
-      - "80:80"
+    # `expose` statt `ports`. Ein Host-Mapping "80:80" belegt Port 80 der
+    # Maschine, und auf dem lauscht bei einem verwalteten Deployment bereits der
+    # Reverse Proxy der Plattform -> "port is already allocated", der Container
+    # startet gar nicht erst. `expose` macht den Port nur im Docker-Netz
+    # bekannt; der Proxy findet den Dienst ueber die konfigurierte Domain.
+    # Fuer den Betrieb ohne Plattform-Proxy (lokal, oder eigener Server ohne
+    # Traefik davor) diese Zeilen gegen `ports: ["80:80"]` tauschen.
+    expose:
+      - "80"
     depends_on:
       - backend
