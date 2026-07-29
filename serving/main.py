@@ -42,8 +42,10 @@ from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
 # Wiederverwendung deiner bestehenden Module
+from torchvision import transforms as T
+
 import stages as pipeline_stages
-from data import transform
+from data import transform as kermany_transform
 from model.model import build_model
 
 # --------------------------------------------------------------------------
@@ -70,7 +72,26 @@ def _resolve(path: str) -> str:
     return path                                    # Fehlermeldung nennt das Original
 
 
-CHECKPOINT_PATH = _resolve(os.getenv("CHECKPOINT_PATH", "checkpoints/best_model.pth"))
+CHECKPOINT_PATH = _resolve(os.getenv("CHECKPOINT_PATH", "checkpoints/rsna_f4_s0.pth"))
+
+# Welche Strecke das geladene Gewicht stammt. Das ist KEINE Kosmetik: die beiden
+# Strecken haben verschiedene Koepfe und verschiedene Vorverarbeitungen, und ein
+# Gewicht mit der falschen Vorverarbeitung zu fuettern liefert Zahlen, die wie
+# Wahrscheinlichkeiten aussehen und keine sind.
+#
+#   rsna     ResNet18, fc -> 1 Logit, Sigmoid.
+#            Resize(size) + Grayscale(3) + ToTensor + Normalize(ImageNet).
+#            Quelle: rsna/pipeline/rsna_train.py, build_transforms() und
+#            `m.fc = nn.Linear(m.fc.in_features, 1)`.
+#   kermany  ResNet18, fc -> 2 Klassen, Softmax, Index 1 = PNEUMONIA.
+#            Resize(224) + CLAHE + ToTensor + PerImageStandardize.
+#            Quelle: serving/data.py, dasselbe `transform`-Objekt, das der
+#            Trainingsloader benutzt.
+#
+# Beim Start wird gegen das state_dict geprueft, ob Familie und Gewicht
+# zusammenpassen; bei Widerspruch bricht der Start ab, statt still zu rechnen.
+MODEL_FAMILY = os.getenv("MODEL_FAMILY", "rsna").lower()
+INPUT_SIZE = int(os.getenv("INPUT_SIZE", "224"))       # rsna_train.py --size, Vorgabe 224
 TEST_DIR = _resolve(os.getenv("TEST_DIR", "data/chest_xray/test"))
 CLASSES = ["NORMAL", "PNEUMONIA"]
 THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))       # Entscheidungsschwelle für PNEUMONIA
@@ -88,14 +109,63 @@ torch.set_num_threads(1)  # begrenzt CPU/RAM auf schwacher Hardware
 # --------------------------------------------------------------------------
 # Modell + Grad-CAM einmalig laden
 # --------------------------------------------------------------------------
-print(f"Lade Modell: {CHECKPOINT_PATH} ...")
-model = build_model(pretrained=False)
+if MODEL_FAMILY not in ("rsna", "kermany"):
+    raise RuntimeError(f"MODEL_FAMILY muss 'rsna' oder 'kermany' sein, nicht {MODEL_FAMILY!r}.")
+
+print(f"Lade Modell: {CHECKPOINT_PATH} (Familie: {MODEL_FAMILY}) ...")
 # weights_only=True: die Datei enthaelt nur Gewichte, also nicht den ganzen
 # Pickle-Interpreter zulassen. Ab Torch 2.6 ist das ohnehin die Vorgabe.
-model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location="cpu", weights_only=True))
+_state = torch.load(CHECKPOINT_PATH, map_location="cpu", weights_only=True)
+
+# Der Kopf verraet die Strecke: 1 Ausgang heisst BCE/Sigmoid (rsna), 2 Ausgaenge
+# heissen CrossEntropy/Softmax (kermany). Passt das nicht zur eingestellten
+# Familie, waere die Vorverarbeitung mit hoher Wahrscheinlichkeit auch falsch,
+# und ein Score aus falscher Vorverarbeitung ist schlimmer als kein Score.
+_n_out = int(_state["fc.weight"].shape[0])
+_expected = 1 if MODEL_FAMILY == "rsna" else 2
+if _n_out != _expected:
+    raise RuntimeError(
+        f"{CHECKPOINT_PATH} hat {_n_out} Ausgang/Ausgaenge, MODEL_FAMILY="
+        f"{MODEL_FAMILY!r} erwartet {_expected}. Entweder das Gewicht oder die "
+        f"Familie ist falsch gesetzt. Kein Start mit dieser Kombination."
+    )
+
+model = build_model(pretrained=False, num_classes=_n_out)
+model.load_state_dict(_state)
 model.eval()
 cam = GradCAM(model=model, target_layers=[model.layer4[-1]])
 print("Modell geladen.")
+
+
+# --------------------------------------------------------------------------
+# Vorverarbeitung: MUSS zum geladenen Gewicht passen
+# --------------------------------------------------------------------------
+# Nachgebaut aus rsna/pipeline/rsna_train.py, build_transforms(size, train=False).
+# Bewusst nicht importiert: das Trainingsmodul zieht die halbe Trainingsstrecke
+# mit, und der Serving-Prozess soll klein bleiben. Wer dort die Transform
+# aendert, muss sie hier mitziehen; deshalb steht die Quelle im Kommentar.
+_IMNET_MEAN, _IMNET_STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+rsna_transform = T.Compose([
+    T.Resize((INPUT_SIZE, INPUT_SIZE)),
+    T.Grayscale(num_output_channels=3),
+    T.ToTensor(),
+    T.Normalize(_IMNET_MEAN, _IMNET_STD),
+])
+
+transform = rsna_transform if MODEL_FAMILY == "rsna" else kermany_transform
+
+
+def pneumonia_prob(tensor: torch.Tensor) -> float:
+    """Wahrscheinlichkeit fuer PNEUMONIA aus der Modellausgabe.
+
+    Die beiden Strecken rechnen verschieden: ein Logit mit Sigmoid (rsna) gegen
+    zwei Klassen mit Softmax und Index 1 (kermany). Das an genau einer Stelle zu
+    haben heisst, dass Einzelbild und TTA garantiert dieselbe Zahl bilden.
+    """
+    out = model(tensor)
+    if MODEL_FAMILY == "rsna":
+        return float(torch.sigmoid(out)[0, 0])
+    return float(torch.softmax(out, dim=1)[0][1])
 
 # Der Segmenter ist OPTIONAL. Fehlt checkpoints/unet_best.pth, laeuft die
 # Analyse unveraendert weiter, nur die Lungenfinder-Karte entfaellt. Sie war nie
@@ -125,10 +195,13 @@ def _png_base64(rgb_uint8: np.ndarray) -> str:
 # --------------------------------------------------------------------------
 # Warum ausgerechnet Ausschnitts-Verschiebungen und keine Drehungen oder
 # Helligkeitsaenderungen:
-#   * Die Bild-Normierung (PerImageStandardize) macht Helligkeit und globalen
-#     Kontrast per Konstruktion wirkungslos - eine Helligkeits-Variante wuerde
-#     also garantiert dieselbe Zahl liefern und eine Stabilitaet vortaeuschen,
-#     die nur die Normierung ist.
+#   * Helligkeit taugt in beiden Strecken nicht als Sonde, aber aus zwei
+#     verschiedenen Gruenden. Bei kermany macht `PerImageStandardize` sie per
+#     Konstruktion wirkungslos: die Variante liefert garantiert dieselbe Zahl
+#     und taeuscht eine Stabilitaet vor, die nur die Normierung ist. Bei rsna
+#     wird mit fester ImageNet-Normierung gerechnet, dort WAERE Helligkeit
+#     wirksam - aber das Training augmentiert bereits mit ColorJitter(0.15),
+#     eine Helligkeitssonde misst also die Augmentierung und nicht das Bild.
 #   * Drehungen erzeugen schwarze Ecken. Deren Wirkung auf den Score waere ein
 #     Artefakt der Fuellfarbe, nicht der Anatomie.
 #   * AUSSCHNITT und ZOOM sind dagegen genau der Kanal, der in diesem Projekt
@@ -169,7 +242,7 @@ def tta_scores(pil_img: Image.Image) -> list[dict]:
     out = []
     for name, frac, dx, dy in TTA_VIEWS:
         t = transform(_view(pil_img, frac, dx, dy)).unsqueeze(0)
-        p = float(torch.softmax(model(t), dim=1)[0][1])
+        p = pneumonia_prob(t)
         out.append({"view": name, "probability": round(p, 4)})
     return out
 
@@ -239,8 +312,7 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
               ms=_stage_ms(ts))
 
     with torch.no_grad():
-        probs = torch.softmax(model(input_tensor), dim=1)[0]
-    prob_pneu = float(probs[1])                      # Index 1 = PNEUMONIA (wie in evaluate.py)
+        prob_pneu = pneumonia_prob(input_tensor)
 
     # Streuung ueber leicht verschobene Bildausschnitte. Die erste Variante ist
     # das unveraenderte Bild und liefert dieselbe Zahl wie oben; sie wird

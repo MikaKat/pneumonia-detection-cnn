@@ -46,6 +46,40 @@ CROP_PAD = 0.05          # margin around the lung bounding box, per side
 # The frontend fetches this once (GET /api/pipeline) and can draw the empty
 # chain with all its labels before a single image has been uploaded. Keys must
 # match the `key` of the stages emitted during the run.
+# The model input stage is described differently depending on which weights the
+# server loaded, because the two training runs preprocess differently. Kept next
+# to each other so the difference is visible in one screen rather than hidden in
+# an if. MODEL_FAMILY is set in main.py and checked there against the checkpoint.
+_FAMILY = os.getenv("MODEL_FAMILY", "rsna").lower()
+
+_FAMILY_TEXT = {
+    "rsna": {
+        "caption": "Resize to 224x224, greyscale, then the fixed ImageNet "
+                   "normalisation the model was trained with. Computed on the full "
+                   "uploaded image.",
+        "note": "The normalisation subtracts the same constants from every image, so "
+                "unlike the picture above it, brightness differences between images "
+                "survive it. It is invisible here anyway: the tensor is re-stretched "
+                "to 0-255 for display, and normalisation and stretch are both affine, "
+                "so they cancel. What you can see is the resize. The model works on "
+                "the unbounded values.",
+    },
+    "kermany": {
+        "caption": "Resize to 224x224, CLAHE for local structure, then per-image "
+                   "standardisation to mean 0 / std 1. Computed on the full "
+                   "uploaded image.",
+        "note": "The per-image standardisation is what removed the global "
+                "brightness/contrast shortcut. It is invisible in this picture by "
+                "construction: the tensor is re-stretched to 0-255 for display, and "
+                "standardisation and stretch are both affine, so they cancel. What "
+                "you can see here is the resize and CLAHE. The model works on the "
+                "unbounded values.",
+    },
+}
+if _FAMILY not in _FAMILY_TEXT:
+    _FAMILY = "rsna"
+
+
 # This list is the scored path and nothing else. Every entry here really does
 # feed the next one, so the arrows the frontend draws between them are true.
 # Work that was built, measured and left out lives in ASIDES below and is drawn
@@ -63,17 +97,14 @@ PIPELINE = [
         # Named after what it does. "What the model sees" said nothing about the
         # two operations that actually change the picture, and standing next to a
         # crop tile it invited the reading that the crop was what got seen.
-        "title": "Resize and normalise contrast",
-        "caption": "Resize to 224x224, CLAHE for local structure, then per-image "
-                   "standardisation to mean 0 / std 1. Computed on the full "
-                   "uploaded image.",
+        #
+        # Caption and note depend on which weights are loaded, because the two
+        # training runs normalise differently and a caption describing the other
+        # one would be a plain untruth. See MODEL_FAMILY in main.py.
+        "title": "Resize and normalise",
+        "caption": _FAMILY_TEXT[_FAMILY]["caption"],
         "status": "active",
-        "note": "The per-image standardisation is what removed the global "
-                "brightness/contrast shortcut. It is invisible in this picture by "
-                "construction: the tensor is re-stretched to 0-255 for display, and "
-                "standardisation and stretch are both affine, so they cancel. What "
-                "you can see here is the resize and CLAHE. The model works on the "
-                "unbounded values.",
+        "note": _FAMILY_TEXT[_FAMILY]["note"],
     },
     {
         "key": "heatmap",

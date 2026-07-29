@@ -67,6 +67,31 @@ validation set was simply easier.
 
 ---
 
+## Data sources
+
+Nothing here ships image data. All three sets are public and have to be downloaded from the
+source, which is also where their licences and terms of use are stated.
+
+| Set | Used for | Source |
+| --- | --- | --- |
+| RSNA Pneumonia Detection Challenge | the classifier: 26,684 adult chest radiographs with radiologist-drawn boxes | [kaggle.com/competitions/rsna-pneumonia-detection-challenge](https://www.kaggle.com/competitions/rsna-pneumonia-detection-challenge) |
+| Kermany paediatric chest X-ray | external validation only, and the first dataset the project ran on | [data.mendeley.com/datasets/rscbjbr9sj](https://data.mendeley.com/datasets/rscbjbr9sj/2) |
+| Montgomery County and Shenzhen | the lung segmenter (U-Net), which the web app shows but which scores nothing | [data.lhncbc.nlm.nih.gov/public/Tuberculosis-Chest-X-ray-Datasets](https://data.lhncbc.nlm.nih.gov/public/Tuberculosis-Chest-X-ray-Datasets/) |
+
+Papers behind them, in the same order: Shih et al., *Augmenting the National Institutes of
+Health Chest Radiograph Dataset with Expert Annotations of Possible Pneumonia*, Radiology:
+Artificial Intelligence 2019. Kermany et al., *Identifying Medical Diagnoses and Treatable
+Diseases by Image-Based Deep Learning*, Cell 2018. Jaeger et al., *Two public chest X-ray
+datasets for computer-aided screening of pulmonary diseases*, Quantitative Imaging in
+Medicine and Surgery 2014.
+
+The Kermany set appears twice on purpose, and the distinction matters for reading finding 7:
+it was the project's starting point, it was abandoned once its file dimensions turned out to
+give the answer away (finding 1), and it comes back only as a held-out external test set that
+no training run ever saw.
+
+---
+
 ## What the model does
 
 The input is a frontal chest radiograph. RSNA ships DICOM, which is converted once to
