@@ -10,10 +10,17 @@ data/
 # (Splits, Seed und Skript stehen im Repo), die Ergebnis-CSVs daneben nicht --
 # deshalb bleiben die Zahlen versioniert und die Gewichte draussen.
 *.pth
-# Ausnahme: die Webapp und der Docker-Build laden genau diese Datei.
-# (Sie ist bereits verfolgt; .gitignore wirkt nicht auf verfolgte Dateien --
-# die Zeile steht hier, damit die Absicht sichtbar bleibt.)
+# Ausnahmen: genau die Dateien, die der Docker-Build per COPY braucht. Ohne sie
+# scheitert das Deployment mit "not found", weil der Build-Kontext nur enthaelt,
+# was auch im Repo liegt.
+#   rsna_f4_s0  der ausgelieferte Klassifikator (1 Logit, MODEL_FAMILY=rsna)
+#   unet_best   der Lungenfinder; optional, ohne ihn entfaellt nur seine Karte
+#   best_model  die frueher ausgelieferte Kermany-Basislinie
+# (Bereits verfolgte Dateien beruehrt .gitignore ohnehin nicht -- die Zeilen
+# stehen hier, damit die Absicht sichtbar bleibt.)
 !checkpoints/best_model.pth
+!checkpoints/rsna_f4_s0.pth
+!checkpoints/unet_best.pth
 
 # --------------------------------------------------------------------------
 # Zwischenstaende, die sich aus den Gewichten neu rechnen lassen
