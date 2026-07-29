@@ -68,7 +68,12 @@ export function ImageSource({ samples, samplesError, selection, onSelect, disabl
             onClick={() => !disabled && inputRef.current?.click()}
             role="button"
             tabIndex={0}
-            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && !disabled && inputRef.current?.click()}
+            onKeyDown={(e) => {
+              if (disabled || (e.key !== "Enter" && e.key !== " ")) return;
+              // Space on a div scrolls the page; the dropzone has to claim it.
+              e.preventDefault();
+              inputRef.current?.click();
+            }}
           >
             <input
               ref={inputRef}

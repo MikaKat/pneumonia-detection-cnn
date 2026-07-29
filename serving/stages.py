@@ -46,6 +46,11 @@ CROP_PAD = 0.05          # margin around the lung bounding box, per side
 # The frontend fetches this once (GET /api/pipeline) and can draw the empty
 # chain with all its labels before a single image has been uploaded. Keys must
 # match the `key` of the stages emitted during the run.
+# This list is the scored path and nothing else. Every entry here really does
+# feed the next one, so the arrows the frontend draws between them are true.
+# Work that was built, measured and left out lives in ASIDES below and is drawn
+# somewhere else entirely: a badge inside a row of arrows loses against the
+# arrows, and readers reasonably concluded that the crop fed the classifier.
 PIPELINE = [
     {
         "key": "upload",
@@ -54,34 +59,21 @@ PIPELINE = [
         "status": "active",
     },
     {
-        "key": "mask",
-        "title": "Create lung mask",
-        "caption": "A U-Net trained from scratch on Montgomery/Shenzhen segments both "
-                   "lungs at 256x256; the mask is then cleaned morphologically.",
-        "status": "explored",
-        "note": "Development stage. Segmenting away everything outside the lungs was "
-                "measured and rejected: the silhouette alone still carries the "
-                "confounder and the mask cuts into the pathology.",
-    },
-    {
-        "key": "crop",
-        "title": "Crop picture",
-        "caption": "The squared bounding rectangle of the mask plus a 5 % margin, "
-                   "shifted inwards rather than shrunk when it leaves the image.",
-        "status": "explored",
-        "note": "Development stage. A rectangle keeps the pathology that a pixel-exact "
-                "mask removes, but on the RSNA data the crop did not reduce the "
-                "projection shortcut, so the deployed model runs on the full image.",
-    },
-    {
         "key": "model_input",
-        "title": "What the model sees",
+        # Named after what it does. "What the model sees" said nothing about the
+        # two operations that actually change the picture, and standing next to a
+        # crop tile it invited the reading that the crop was what got seen.
+        "title": "Resize and normalise contrast",
         "caption": "Resize to 224x224, CLAHE for local structure, then per-image "
-                   "standardisation to mean 0 / std 1.",
+                   "standardisation to mean 0 / std 1. Computed on the full "
+                   "uploaded image.",
         "status": "active",
         "note": "The per-image standardisation is what removed the global "
-                "brightness/contrast shortcut. Shown re-stretched for display; the "
-                "model works on the unbounded values.",
+                "brightness/contrast shortcut. It is invisible in this picture by "
+                "construction: the tensor is re-stretched to 0-255 for display, and "
+                "standardisation and stretch are both affine, so they cancel. What "
+                "you can see here is the resize and CLAHE. The model works on the "
+                "unbounded values.",
     },
     {
         "key": "heatmap",
@@ -91,7 +83,30 @@ PIPELINE = [
     },
 ]
 
-PIPELINE_BY_KEY = {s["key"]: s for s in PIPELINE}
+# --------------------------------------------------------------------------
+# Off to the side
+# --------------------------------------------------------------------------
+# Computed on every image and shown, but not part of the scored path and not
+# drawn as a link in it. The segmenter is a separate piece of work that does its
+# own job well; the honest way to show it is on its own, not as a step of a
+# chain it does not belong to.
+ASIDES = [
+    {
+        "key": "mask",
+        "title": "Lung finder",
+        "caption": "A U-Net trained from scratch on Montgomery/Shenzhen segments both "
+                   "lungs at 256x256; the mask is then cleaned morphologically.",
+        "status": "explored",
+        "group": "aside",
+        "note": "This runs on your image, but it does not touch the score. Feeding the "
+                "classifier only the lungs was measured and rejected: the silhouette "
+                "alone still carries the confounder, and the mask cuts into the "
+                "pathology it is meant to isolate. It is shown because it is a working "
+                "segmenter, not because the classifier needs it.",
+    },
+]
+
+PIPELINE_BY_KEY = {s["key"]: s for s in [*PIPELINE, *ASIDES]}
 
 
 def stage(key: str, image_b64: str | None, **extra) -> dict:
@@ -104,8 +119,9 @@ def stage(key: str, image_b64: str | None, **extra) -> dict:
         "status": meta["status"],
         "image_png_base64": image_b64,
     }
-    if meta.get("note"):
-        out["note"] = meta["note"]
+    for optional in ("note", "group"):
+        if meta.get(optional):
+            out[optional] = meta[optional]
     out.update(extra)
     return out
 
@@ -322,6 +338,10 @@ def render_mask_overlay(pil_img: Image.Image, mask: np.ndarray) -> str:
     return _png_b64(rgb)
 
 
+# Kept, but no longer called by the running app: the crop tile was taken out of
+# the interface because it read as a step of the scored path when it never was
+# one. The code stays because it is what the crop findings were measured with
+# and `test_*` still covers it. Nothing in serving/ calls it.
 def render_crop(pil_img: Image.Image, mask: np.ndarray) -> tuple[str, dict]:
     """The cropped image plus the box it came from, in fractions of the original."""
     x0, y0, side = square_crop_box(mask)

@@ -1,62 +1,130 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
-// The preprocessing chain: one tile per step, joined by arrows, filling up from
-// left to right while the backend works. Tiles are not animated on a timer -
-// each one appears when its stage actually arrives from GET /api/jobs (see
-// api.js `pollJob`), so the chain is a progress display, not a decoration.
+// The preprocessing chain, drawn as a fork rather than a line.
 //
-// `plan`   static description of all steps (GET /api/pipeline), may be null
-// `stages` the steps that have arrived so far, in order
-// `running` whether the job is still being processed
-export function PipelineView({ plan, stages, running }) {
-  const [zoom, setZoom] = useState(null); // the tile shown enlarged
+// The upload branches into two rows. The top row is the lung finder, which is a
+// dead end: it is computed on your image and then nothing reads it. The bottom
+// row is the scored path, where each tile really is the input to the next.
+//
+// It used to be one row with an "explored" badge on the stages that are not
+// scored. That failed in the most direct way possible: the author of the
+// project read his own interface and concluded the crop was being classified. A
+// row of identical arrows is a diagram, a badge is a label, and the diagram
+// wins. So the geometry now carries the claim, and the badge only repeats it.
+//
+// `plan`     static description of the scored path (GET /api/pipeline .stages)
+// `asides`   static description of the side results (.asides), may be empty
+// `stages`   the steps that have arrived so far, in the order they arrived
+// `running`  whether the job is still being processed
+export function PipelineView({ plan, asides, stages, running }) {
+  const [zoom, setZoom] = useState(null);
 
-  // Fall back to the arrived stages if the static plan could not be loaded, so
-  // the chain still renders (just without placeholders for what is still to come).
-  const steps = plan?.length ? plan : stages;
+  const isAside = (s) => s.group === "aside";
   const byKey = new Map(stages.map((s) => [s.key, s]));
-  const doneCount = stages.length;
 
-  // The first step that has no stage yet is the one currently being computed.
-  const activeIndex = running ? doneCount : -1;
+  // Progress is counted over the scored path alone. The lung mask arrives
+  // between the upload and the model input, and counting it would advance the
+  // "computing now" marker onto a step that has not run yet.
+  const chainArrived = stages.filter((s) => !isAside(s));
+  const chainSteps = (plan?.length ? plan : chainArrived).filter((s) => !isAside(s));
+  const activeIndex = running ? chainArrived.length : -1;
 
-  const tiles = steps.map((step, i) => {
+  const build = (step, state) => ({ ...step, ...(byKey.get(step.key) || {}), state });
+
+  const chainTiles = chainSteps.map((step, i) => {
     const arrived = byKey.get(step.key);
     let state = "pending";
     if (arrived?.skipped) state = "skipped";
     else if (arrived) state = "done";
     else if (i === activeIndex) state = "running";
-    return { ...step, ...(arrived || {}), state };
+    return build(step, state);
   });
+
+  // The side branch hangs off the upload, so it is being computed once the
+  // upload is through and it has not arrived yet.
+  const asideSteps = (asides?.length
+    ? asides
+    : stages.filter(isAside)
+  );
+  const asideTiles = asideSteps.map((step) => {
+    const arrived = byKey.get(step.key);
+    let state = "pending";
+    if (arrived?.skipped) state = "skipped";
+    else if (arrived) state = "done";
+    else if (running && chainArrived.length >= 1) state = "running";
+    return build(step, state);
+  });
+
+  const [root, ...scoredRest] = chainTiles;
+  const forked = Boolean(root) && asideTiles.length > 0 && scoredRest.length > 0;
+
+  const openZoom = (tile) => tile.image_png_base64 && setZoom(tile);
 
   return (
     <section className="card pipeline">
       <div className="pipeline-head">
         <h2 className="pipeline-title">Processing chain</h2>
         <p className="muted pipeline-sub">
-          Every picture below is computed on your image, in this order. Steps marked{" "}
-          <span className="chip chip--explored">explored</span> were built and measured
-          during development but are <strong>not</strong> part of the scored path. The
-          classifier runs on the full image, exactly as it was trained.
+          {forked ? (
+            <>
+              The lower row is the scored path: each picture is the input to the next,
+              and the classifier runs on the full image, exactly as it was trained. The
+              upper row is computed on the same image and then{" "}
+              <strong>goes nowhere</strong>.
+            </>
+          ) : (
+            <>
+              Every picture below is computed on your image, in this order, and each one
+              is the input to the next. The classifier runs on the full image, exactly as
+              it was trained: no cropping, no masking.
+            </>
+          )}
         </p>
       </div>
 
-      <ol className="chain">
-        {tiles.map((tile, i) => (
-          <li key={tile.key} className="chain-item">
-            {i > 0 && (
-              <span
-                className={"arrow" + (tile.state === "pending" ? " arrow--pending" : "")}
-                aria-hidden="true"
-              />
-            )}
-            <PipelineTile tile={tile} onZoom={() => tile.image_png_base64 && setZoom(tile)} />
-          </li>
-        ))}
-      </ol>
+      {forked ? (
+        <div className="fork">
+          <div className="fork-root">
+            <PipelineTile tile={root} onZoom={() => openZoom(root)} />
+          </div>
+          <div className="fork-rows">
+            <Row tiles={asideTiles} onZoom={openZoom} variant="aside" first />
+            <Row tiles={scoredRest} onZoom={openZoom} />
+          </div>
+        </div>
+      ) : (
+        <Row tiles={chainTiles} onZoom={openZoom} lead={false} />
+      )}
 
       {zoom && <ZoomOverlay tile={zoom} onClose={() => setZoom(null)} />}
     </section>
+  );
+}
+
+// One horizontal run of tiles. `lead` draws an arrow before the first tile,
+// which is what turns a row into a branch of the fork rather than a start.
+function Row({ tiles, onZoom, variant, first, lead = true }) {
+  return (
+    <ol
+      className={
+        "chain fork-row" +
+        (variant === "aside" ? " fork-row--aside" : "") +
+        (first ? " fork-row--first" : "")
+      }
+    >
+      {tiles.map((tile, i) => (
+        <li key={tile.key} className="chain-item">
+          {(i > 0 || lead) && (
+            <span
+              className={"arrow" + (tile.state === "pending" ? " arrow--pending" : "")}
+              aria-hidden="true"
+            />
+          )}
+          <PipelineTile tile={tile} onZoom={() => onZoom(tile)} />
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -75,7 +143,12 @@ function PipelineTile({ tile, onZoom }) {
       onClick={src ? onZoom : undefined}
       role={src ? "button" : undefined}
       tabIndex={src ? 0 : undefined}
-      onKeyDown={(e) => src && (e.key === "Enter" || e.key === " ") && onZoom()}
+      onKeyDown={(e) => {
+        if (!src || (e.key !== "Enter" && e.key !== " ")) return;
+        // Space on a non-button element scrolls the page; the tile has to claim it.
+        e.preventDefault();
+        onZoom();
+      }}
       title={src ? "Click to enlarge" : undefined}
     >
       <div className="tile-frame">
@@ -86,7 +159,7 @@ function PipelineTile({ tile, onZoom }) {
       </div>
       <figcaption className="tile-caption">
         <span className="tile-title">{tile.title}</span>
-        {explored && <span className="chip chip--explored">explored</span>}
+        {explored && <span className="chip chip--explored">not scored</span>}
         {typeof tile.ms === "number" && <span className="tile-ms">{tile.ms} ms</span>}
         {tile.state === "skipped" && tile.reason && (
           <span className="tile-reason">{tile.reason}</span>
@@ -104,23 +177,45 @@ function ZoomOverlay({ tile, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  return (
-    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true">
+  // Rendered into document.body, not into the pipeline card. A `position:
+  // fixed` overlay is only fixed to the viewport while no ancestor has a
+  // transform, filter or containment; any one of those turns the ancestor into
+  // the containing block and lets ordinary page content paint over the dialog.
+  // The card above it is animated, so this is not hypothetical.
+  return createPortal(
+    <div
+      className="modal-overlay"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="zoom-title"
+    >
+      {/* Header and footer do not scroll. A stage image can be taller than the
+          screen, and when it is, the only Close button used to end up below the
+          fold inside the scrolled body with no way out in view. */}
       <div className="modal modal--zoom" onClick={(e) => e.stopPropagation()}>
-        <h2>{tile.title}</h2>
-        <img
-          className="zoom-img"
-          src={`data:image/png;base64,${tile.image_png_base64}`}
-          alt={tile.title}
-        />
-        <p className="muted">{tile.caption}</p>
-        {tile.note && <p className="tile-note">{tile.note}</p>}
-        <div className="actions">
+        <div className="modal-head">
+          <h2 id="zoom-title">{tile.title}</h2>
+          <button className="modal-close" onClick={onClose} aria-label="Close">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </div>
+        <div className="modal-scroll">
+          <img
+            className="zoom-img"
+            src={`data:image/png;base64,${tile.image_png_base64}`}
+            alt={tile.title}
+          />
+          <p className="muted">{tile.caption}</p>
+          {tile.note && <p className="tile-note">{tile.note}</p>}
+        </div>
+        <div className="modal-foot">
           <button className="btn btn-primary" onClick={onClose}>
             Close
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

@@ -3,22 +3,45 @@
   --panel: #17212b;
   --panel-2: #1e2b38;
   --border: #2a3a49;
+  --border-strong: #3a4d5f;
   --text: #e7edf3;
   --muted: #9fb0c0;
   --primary: #2f7fe0;
   --primary-hover: #3a8cf0;
+  --focus: #8ec0ff;
   --pos: #e0574b;
   --pos-bg: #3a1f1c;
   --neg: #35b37e;
   --neg-bg: #16301f;
   --warn-bg: #3a2f14;
   --warn-border: #6b581f;
-  --radius: 12px;
-  --shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  --warn-text: #f0e2bf;
+
+  /* Radius scale. Nested surfaces step down so the corners stay concentric:
+     a card at 14 holds inner blocks at 10, which hold controls at 8. Card
+     padding is larger than the radius difference, so the layers are treated as
+     separate surfaces rather than forcing outer = inner + padding. */
+  --radius-lg: 16px;
+  --radius: 14px;
+  --radius-md: 10px;
+  --radius-sm: 8px;
+
+  /* Layered and transparent, so the same shadow works on the page background
+     and on top of a panel. Borders do the separating, shadows do the lifting. */
+  --shadow-sm: 0 1px 1px rgba(0, 0, 0, 0.16), 0 2px 6px -1px rgba(0, 0, 0, 0.22);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.2), 0 6px 16px -4px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.24), 0 16px 40px -12px rgba(0, 0, 0, 0.6);
+
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 * {
   box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
@@ -29,10 +52,46 @@ body {
   line-height: 1.5;
 }
 
+::selection {
+  background: rgba(47, 127, 224, 0.35);
+}
+
+/* One focus ring for the whole app. Never removed, only ever replaced. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .app {
   max-width: 760px;
   margin: 0 auto;
   padding: 0 16px 48px;
+}
+
+/* Headings and short labels break on meaning, longer copy avoids orphans.
+   Neither is applied to numbers or to the hard-wrapped parts of the captions. */
+h1,
+h2,
+h3,
+.dropzone-title,
+.pipeline-title,
+.tile-title,
+.score-label,
+.queue-label {
+  text-wrap: balance;
+}
+
+p,
+li,
+figcaption,
+.subtitle,
+.muted,
+.selected-note,
+.score-range,
+.heatmap-caption,
+.tile-reason,
+.disclaimer-banner {
+  text-wrap: pretty;
 }
 
 /* ---------- disclaimer ---------- */
@@ -43,26 +102,37 @@ body {
   padding: 10px 14px;
   margin: 16px 0;
   font-size: 0.9rem;
-  color: #f0e2bf;
+  color: var(--warn-text);
 }
 
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(6, 10, 14, 0.72);
+  backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 16px;
   z-index: 100;
+  /* last resort: if a dialog still outgrows the screen, the overlay scrolls
+     rather than clipping the dialog's ends off both edges */
+  overflow-y: auto;
+  animation: overlay-in 180ms var(--ease-out) backwards;
 }
 .modal {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: 24px;
   max-width: 520px;
-  box-shadow: var(--shadow);
+  max-height: calc(100vh - 32px);
+  /* dvh so the mobile browser's collapsing toolbar does not push the dialog
+     past the bottom of the screen; vh above is the fallback */
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+  animation: modal-in 220ms var(--ease-out) backwards;
 }
 .modal h2 {
   margin-top: 0;
@@ -75,6 +145,22 @@ body {
   margin: 4px 0;
 }
 
+/* Enter: opacity plus a short rise and a touch of blur. There is no matching
+   exit animation because these overlays unmount immediately; a fake exit would
+   have to delay the unmount, and a modal that lingers reads as a stuck app. */
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+    filter: blur(3px);
+  }
+}
+
 /* ---------- header ---------- */
 .app-header {
   margin: 8px 0 20px;
@@ -82,6 +168,7 @@ body {
 .app-header h1 {
   margin: 0;
   font-size: 1.5rem;
+  letter-spacing: -0.01em;
 }
 .subtitle {
   margin: 4px 0 0;
@@ -95,7 +182,29 @@ body {
   border-radius: var(--radius);
   padding: 18px;
   margin: 16px 0;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-sm);
+}
+/* Cards that appear part way through a run get an entrance, so the layout
+   grows instead of jumping. Cards present on first paint do not.
+
+   fill-mode is `backwards`, never `both`. With `both` the finished animation
+   keeps applying its end keyframe, and because these keyframes touch
+   `transform` the element is left with an identity transform rather than
+   `transform: none`. An identity transform still opens a stacking context,
+   which traps any `position: fixed` dialog rendered inside the card and lets
+   ordinary page content paint over it. `backwards` fills only before the
+   animation starts and leaves nothing behind. */
+.card.queue,
+.card.pipeline,
+.card.result,
+.card.banner-error {
+  animation: surface-in 240ms var(--ease-out) backwards;
+}
+@keyframes surface-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 .banner-error {
   background: var(--pos-bg);
@@ -110,8 +219,11 @@ body {
 .ratelimit-head {
   display: flex;
   justify-content: space-between;
+  gap: 12px;
   font-size: 0.9rem;
   margin-bottom: 6px;
+  /* the counter changes as analyses are used up, so the digits must not shift */
+  font-variant-numeric: tabular-nums;
 }
 .ratelimit-track {
   height: 8px;
@@ -122,7 +234,10 @@ body {
 .ratelimit-fill {
   height: 100%;
   background: var(--primary);
-  transition: width 0.3s ease;
+  border-radius: 999px;
+  transition-property: width, background-color;
+  transition-duration: 300ms;
+  transition-timing-function: var(--ease-out);
 }
 .ratelimit-fill--low {
   background: var(--pos);
@@ -136,13 +251,22 @@ body {
 }
 .tab {
   flex: 1;
+  min-height: 40px;
   padding: 9px 12px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   color: var(--muted);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  font: inherit;
   font-size: 0.92rem;
+  transition-property: background-color, border-color, color;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+.tab:hover:not(.tab--active) {
+  border-color: var(--border-strong);
+  color: var(--text);
 }
 .tab--active {
   background: var(--primary);
@@ -151,13 +275,19 @@ body {
 }
 
 /* ---------- dropzone ---------- */
+/* One step in from the card that holds it (14 outside, 10 inside). */
 .dropzone {
   border: 2px dashed var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   padding: 32px 16px;
   text-align: center;
   cursor: pointer;
-  transition: border-color 0.2s, background 0.2s;
+  transition-property: border-color, background-color;
+  transition-duration: 180ms;
+  transition-timing-function: ease-out;
+}
+.dropzone:hover:not(.dropzone--disabled) {
+  border-color: var(--border-strong);
 }
 .dropzone--over {
   border-color: var(--primary);
@@ -186,11 +316,22 @@ body {
   position: relative;
   padding: 0;
   border: 2px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   cursor: pointer;
   background: var(--panel-2);
   aspect-ratio: 1 / 1;
+  transition-property: border-color, box-shadow;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+.sample:hover:not(:disabled):not(.sample--active) {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-md);
+}
+.sample:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 .sample img {
   width: 100%;
@@ -219,22 +360,29 @@ body {
   padding: 2px 6px;
   border-radius: 999px;
   color: #fff;
+  /* X-rays are bright at the edges; the shadow keeps the label readable
+     without putting an opaque plate over the image */
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
 }
 .tag--normal {
-  background: rgba(53, 179, 126, 0.9);
+  background: rgba(53, 179, 126, 0.92);
 }
 .tag--pneumonia {
-  background: rgba(224, 87, 75, 0.9);
+  background: rgba(224, 87, 75, 0.92);
 }
 
 /* ---------- preview ---------- */
 .preview-card {
   text-align: center;
 }
+/* A neutral inset outline, not a brand-tinted border: a mostly black X-ray on a
+   dark panel otherwise has no visible edge. */
 .preview-img {
   max-width: 100%;
   max-height: 340px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
+  outline: 1px solid rgba(255, 255, 255, 0.12);
+  outline-offset: -1px;
 }
 
 /* ---------- actions / buttons ---------- */
@@ -243,29 +391,44 @@ body {
   gap: 10px;
   align-items: center;
   margin: 16px 0 4px;
+  flex-wrap: wrap;
 }
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--text);
   padding: 10px 16px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  font: inherit;
   font-size: 0.95rem;
+  transition-property: background-color, border-color, color, box-shadow, transform;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
 }
 .btn:hover:not(:disabled) {
   border-color: var(--primary);
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 .btn-primary {
   background: var(--primary);
   border-color: var(--primary);
   color: #fff;
+  box-shadow: var(--shadow-sm);
 }
 .btn-primary:hover:not(:disabled) {
   background: var(--primary-hover);
+  border-color: var(--primary-hover);
 }
 .btn-lg {
   padding: 12px 22px;
+  min-height: 46px;
   font-size: 1rem;
 }
 .btn-ghost {
@@ -276,11 +439,32 @@ body {
   cursor: not-allowed;
 }
 
+/* Small button, full-size target: the visible pill stays 32px so it does not
+   shout next to the score, while the pseudo-element gives it a 40px row to be
+   hit in. It stands alone on its own line, so nothing overlaps. */
+.btn-sm {
+  position: relative;
+  min-height: 32px;
+  padding: 5px 10px;
+  font-size: 0.82rem;
+}
+.btn-sm::after {
+  content: "";
+  position: absolute;
+  inset: -4px -6px;
+}
+
 /* ---------- queue ---------- */
+/* The spinner belongs to the label, not to the block as a whole, so it lines up
+   with the first line rather than floating against the middle of two lines.
+   -1px is the optical correction for a 28px disc against a 24px line box. */
 .queue {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 16px;
+}
+.queue .spinner {
+  margin-top: -1px;
 }
 .queue-text {
   flex: 1;
@@ -288,6 +472,8 @@ body {
 .queue-label {
   margin: 0;
   font-weight: 600;
+  /* the queue position counts down in place */
+  font-variant-numeric: tabular-nums;
 }
 .spinner {
   width: 28px;
@@ -320,6 +506,7 @@ body {
   font-size: 2rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
 }
 .score-track {
   position: relative;
@@ -337,12 +524,14 @@ body {
   background: rgba(47, 127, 224, 0.45);
   border-radius: 999px;
 }
+/* Centred on its position by transform rather than by a fixed half-pixel
+   margin, so the tick sits exactly over the value it marks. */
 .score-mark {
   position: absolute;
   top: -3px;
   bottom: -3px;
   width: 3px;
-  margin-left: -1px;
+  transform: translateX(-50%);
   background: var(--primary);
   border-radius: 2px;
 }
@@ -352,21 +541,25 @@ body {
   margin-top: 4px;
   font-size: 0.7rem;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .score-range {
   margin: 10px 0 8px;
   font-size: 0.88rem;
   color: var(--muted);
 }
-.btn-sm {
-  padding: 5px 10px;
-  font-size: 0.82rem;
-}
 .view-list {
   list-style: none;
   margin: 10px 0 0;
   padding: 0;
   font-size: 0.82rem;
+  animation: list-in 200ms var(--ease-out) backwards;
+}
+@keyframes list-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
 }
 .view-list li {
   display: flex;
@@ -380,9 +573,9 @@ body {
   padding: 12px 14px;
   background: var(--warn-bg);
   border: 1px solid var(--warn-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   font-size: 0.88rem;
-  color: #f0e2bf;
+  color: var(--warn-text);
 }
 .honesty p {
   margin: 0 0 8px;
@@ -401,7 +594,8 @@ body {
   margin: 0 auto;
   aspect-ratio: 1 / 1;
   background: #000;
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 /* `fill`, not `contain`: both layers are squeezed into the square the same way
@@ -416,25 +610,80 @@ body {
   height: 100%;
   object-fit: fill;
 }
+/* Short and linear so the layer tracks the slider instead of trailing it. */
 .heatmap-overlay {
-  transition: opacity 0.1s linear;
+  transition-property: opacity;
+  transition-duration: 100ms;
+  transition-timing-function: linear;
 }
 .slider {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   max-width: 420px;
-  margin: 14px auto 0;
+  margin: 10px auto 0;
   font-size: 0.85rem;
   color: var(--muted);
 }
-.slider input {
+/* The native control is about 20px tall and drawn differently in every browser.
+   Rebuilt here at a 40px hit height over a 6px track, so the target is
+   reachable and the look matches the rest of the page. */
+.slider input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
   width: 100%;
+  height: 40px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  accent-color: var(--primary);
 }
+.slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+.slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--panel);
+  box-shadow: var(--shadow-sm);
+  /* (track height 8 including its borders - thumb 18) / 2 */
+  margin-top: -5px;
+  transition-property: transform, background-color;
+  transition-duration: 120ms;
+  transition-timing-function: ease-out;
+}
+.slider input[type="range"]:active::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+.slider input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+.slider input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+/* Ranged left, not centred: this is four or five lines of explanation, and
+   centred prose gives every line a different start point to find. It keeps the
+   420px measure of the image above it, so the block still reads as its caption. */
 .heatmap-caption {
   max-width: 420px;
   margin: 10px auto 0;
-  text-align: center;
+  text-align: left;
   font-size: 0.82rem;
 }
 .result-footer {
@@ -444,6 +693,8 @@ body {
   gap: 12px;
   margin-top: 18px;
   flex-wrap: wrap;
+  /* the inference time changes from run to run */
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- pipeline chain ---------- */
@@ -470,6 +721,18 @@ body {
   margin: 0;
   padding: 0 0 6px;
   overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.chain::-webkit-scrollbar {
+  height: 8px;
+}
+.chain::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+.chain::-webkit-scrollbar-track {
+  background: transparent;
 }
 .chain-item {
   display: flex;
@@ -494,11 +757,13 @@ body {
   margin-top: -1px;
   background: var(--primary);
 }
+/* A rotated square reads as pointing past its own box, so the chevron is set in
+   from the edge rather than run flush with it. */
 .arrow::after {
   content: "";
   position: absolute;
   top: 50%;
-  right: 5px;
+  right: 6px;
   width: 8px;
   height: 8px;
   border-top: 2px solid var(--primary);
@@ -516,7 +781,7 @@ body {
   width: 118px;
   margin: 0;
   flex-shrink: 0;
-  animation: tile-in 0.35s ease both;
+  animation: tile-in 0.35s var(--ease-out) backwards;
 }
 @keyframes tile-in {
   from {
@@ -528,17 +793,22 @@ body {
   opacity: 0.45;
   animation: none;
 }
+/* A 1px border inside a 10px frame leaves the clipped image at an optical 9px,
+   which is what the concentric rule asks for here. */
 .tile-frame {
   position: relative;
   width: 118px;
   height: 118px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #000;
   overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition-property: border-color, box-shadow;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
 }
 .tile-frame img {
   width: 100%;
@@ -559,6 +829,12 @@ body {
 }
 .tile--clickable:hover .tile-frame {
   border-color: var(--primary);
+}
+/* The tile is the focusable element, not the frame, so the ring goes here. */
+.tile:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: var(--radius-md);
 }
 .spinner--sm {
   width: 22px;
@@ -591,6 +867,10 @@ body {
   color: var(--muted);
   font-size: 0.7rem;
 }
+/* the per-step timing changes on every run */
+.tile-ms {
+  font-variant-numeric: tabular-nums;
+}
 .chip {
   align-self: flex-start;
   font-size: 0.65rem;
@@ -603,26 +883,95 @@ body {
 .chip--explored {
   border-color: var(--warn-border);
   background: var(--warn-bg);
-  color: #f0e2bf;
+  color: var(--warn-text);
 }
 .tile-note {
   font-size: 0.85rem;
-  color: #f0e2bf;
+  color: var(--warn-text);
   background: var(--warn-bg);
   border: 1px solid var(--warn-border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
 }
+/* Three bands: a header that stays, a body that scrolls, a footer that stays.
+   The shell itself must not scroll, or the header would scroll away with it. */
 .modal--zoom {
   max-width: 560px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 16px 10px 20px;
+  flex-shrink: 0;
+}
+.modal-head h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+.modal-close {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font: inherit;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  transition-property: background-color, border-color, color, transform;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+/* the multiplication sign sits above the optical centre in most UI faces */
+.modal-close span {
+  display: block;
+  margin-top: -2px;
+}
+.modal-close:hover {
+  color: var(--text);
+  border-color: var(--primary);
+}
+.modal-close:active {
+  transform: scale(0.94);
+}
+/* min-height 0 so this band may actually shrink inside the flex column */
+.modal-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 20px 12px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+/* The rule marks where the scrolling body ends, so a line of text cut off at
+   the boundary reads as "there is more below" and not as a rendering fault. */
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
 }
 .zoom-img {
   display: block;
   width: 100%;
   max-height: 55vh;
   object-fit: contain;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: #000;
+  outline: 1px solid rgba(255, 255, 255, 0.12);
+  outline-offset: -1px;
 }
 
 /* Narrow screens: the chain stacks vertically and the arrows turn downwards. */
@@ -648,7 +997,7 @@ body {
   }
   .arrow::after {
     top: auto;
-    bottom: 5px;
+    bottom: 6px;
     right: auto;
     left: 50%;
     transform: translateX(-50%) rotate(135deg);
@@ -657,6 +1006,151 @@ body {
     align-items: center;
     text-align: center;
   }
+  /* the chip sets its own alignment, so it has to be told about the change too */
+  .chip {
+    align-self: center;
+  }
+}
+
+/* ---------- the fork ---------- */
+/* The upload on the left, two rows branching off it: the side result on top,
+   the scored path below. The geometry is the claim here, so it has to be right
+   rather than merely decorative. */
+.fork {
+  display: flex;
+  align-items: flex-start;
+}
+.fork-root {
+  flex-shrink: 0;
+}
+.fork-rows {
+  /* half of .tile-frame, i.e. the height the arrows sit at */
+  --mid: 59px;
+  --fork-gap: 18px;
+  --spine: 26px;
+  /* where the vertical trunk sits, measured from the upload tile's right edge */
+  --spine-x: 10px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--fork-gap);
+  padding-left: var(--spine);
+  min-width: 0;
+}
+/* The stub out of the upload tile as far as the trunk. Only as long as the gap
+   before the trunk: from there on each row draws its own arm. */
+.fork-rows::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: calc(var(--mid) - 1px);
+  width: var(--spine-x);
+  height: 2px;
+  background: var(--primary);
+}
+/* The spine, from the arrow height of the first row down to the arrow height of
+   the second. Measured downwards from the first row's bottom edge, so it lands
+   correctly whether that row's caption runs to one line or three. */
+.fork-row--first::before {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--spine) + var(--spine-x));
+  top: calc(var(--mid) - 1px);
+  bottom: calc(-1 * (var(--fork-gap) + var(--mid) - 1px));
+  width: 2px;
+  background: var(--primary);
+}
+/* Every row's own arm, from the trunk to where its first arrow starts. Without
+   this the lower row hangs in the air next to a trunk it never joins. */
+.fork-row::after {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--spine) + var(--spine-x));
+  top: calc(var(--mid) - 1px);
+  width: calc(var(--spine) - var(--spine-x));
+  height: 2px;
+  background: var(--primary);
+}
+/* `.chain` scrolls horizontally, which would clip the spine drawn to the left
+   of the row. The fork rows are short by construction (one and two tiles), so
+   they never need to scroll and can let the connector out of the box. */
+.fork-row {
+  position: relative;
+  margin: 0;
+  overflow: visible;
+}
+/* Both branches are drawn in the same blue. What marks the side branch is that
+   it stops: no outgoing arrow, a dashed tile frame and the "not scored" chip.
+   The absence of a continuation is the signal, so it does not need a second one
+   in colour. */
+
+@media (max-width: 560px) {
+  /* Stacked layout: the fork's horizontal spine has nothing to span, so it goes
+     away rather than pointing at empty space. */
+  .fork {
+    flex-direction: column;
+    align-items: center;
+  }
+  .fork-rows {
+    padding-left: 0;
+    align-items: center;
+  }
+  .fork-rows::before,
+  .fork-row--first::before,
+  .fork-row::after {
+    display: none;
+  }
+}
+
+/* ---------- side result: the lung finder ---------- */
+/* The mask also appears as a tile in the fork above. This card is the one place
+   it is shown large enough to judge, so it is worth the space. It is drawn
+   quieter than the result card, because it is interesting and it is not the
+   answer, and the styling has to say that before the text does. */
+.aside-card {
+  background: transparent;
+  border-style: dashed;
+  box-shadow: none;
+}
+.aside-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.aside-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.aside-head .chip {
+  align-self: center;
+}
+.aside-sub {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+}
+.aside-figure {
+  margin: 14px 0 0;
+}
+.aside-img {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  margin: 0 auto;
+  border-radius: var(--radius-md);
+  background: #000;
+  outline: 1px solid rgba(255, 255, 255, 0.12);
+  outline-offset: -1px;
+}
+.aside-ms {
+  margin: 6px 0 0;
+  text-align: center;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.aside-note {
+  margin: 14px 0 0;
 }
 
 /* ---------- misc ---------- */
@@ -678,4 +1172,26 @@ body {
   font-size: 0.8rem;
   color: var(--muted);
   text-align: center;
+}
+
+/* Anyone who has asked for less movement gets the states without the travel.
+   The spinner keeps turning, slowly: it is the only sign that work is running. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .btn:active:not(:disabled),
+  .modal-close:active,
+  .slider input[type="range"]:active::-webkit-slider-thumb {
+    transform: none;
+  }
+  .spinner {
+    animation-duration: 1.6s !important;
+    animation-iteration-count: infinite !important;
+  }
 }

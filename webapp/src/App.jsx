@@ -13,6 +13,7 @@ import { RateLimitBar } from "./components/RateLimitBar.jsx";
 import { ImageSource } from "./components/ImageSource.jsx";
 import { QueueStatus } from "./components/QueueStatus.jsx";
 import { PipelineView } from "./components/PipelineView.jsx";
+import { LungFinder } from "./components/LungFinder.jsx";
 import { ResultView } from "./components/ResultView.jsx";
 
 export default function App() {
@@ -28,6 +29,7 @@ export default function App() {
   const [jobStatus, setJobStatus] = useState(null); // submitting|queued|processing
   const [jobPosition, setJobPosition] = useState(null);
   const [pipelinePlan, setPipelinePlan] = useState(null); // static chain description
+  const [asidePlan, setAsidePlan] = useState([]);         // side results, not the scored path
   const [stages, setStages] = useState([]);               // stage images as they arrive
   const [result, setResult] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null); // { message, code, reset_at }
@@ -61,8 +63,12 @@ export default function App() {
         // Only keep the plan if the backend actually produces stage images;
         // otherwise the chain would sit there with permanent placeholders.
         setPipelinePlan(p.enabled ? p.stages || [] : []);
+        // `asides` is absent on a backend from before the split; the card then
+        // falls back to the text the stage itself carries.
+        setAsidePlan(p.enabled ? p.asides || [] : []);
       } catch {
         setPipelinePlan([]); // older backend without /api/pipeline
+        setAsidePlan([]);
       }
     })();
   }, []);
@@ -218,10 +224,18 @@ export default function App() {
           (stages.length > 0 || (pipelinePlan?.length > 0 && phase === "running")) && (
             <PipelineView
               plan={pipelinePlan}
+              asides={asidePlan}
               stages={stages}
               running={phase === "running"}
             />
           )}
+
+        {/* Above the score, below the chain. It is a side result, so it does not
+            interrupt the scored path; it renders nothing when no segmenter is
+            available. */}
+        {(phase === "done" || phase === "running") && (
+          <LungFinder plan={asidePlan} stages={stages} />
+        )}
 
         {phase === "done" && result && (
           <ResultView

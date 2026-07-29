@@ -98,13 +98,14 @@ cam = GradCAM(model=model, target_layers=[model.layer4[-1]])
 print("Modell geladen.")
 
 # Der Segmenter ist OPTIONAL. Fehlt checkpoints/unet_best.pth, laeuft die
-# Analyse unveraendert weiter, nur die Masken- und Crop-Kachel entfallen.
+# Analyse unveraendert weiter, nur die Lungenfinder-Karte entfaellt. Sie war nie
+# im Wertungspfad, also fehlt dem Score nichts.
 if SHOW_STAGES:
     if pipeline_stages.load_segmenter():
         print("U-Net (Lungensegmentierung) geladen.")
     else:
         print(f"U-Net nicht verfuegbar ({pipeline_stages.segmenter_status()['error']}) - "
-              f"Masken- und Crop-Stufe werden uebersprungen.")
+              f"Lungenfinder wird uebersprungen.")
 
 
 def _now_iso(ts: float) -> str:
@@ -180,17 +181,23 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
     Ende. Der Aufrufer haengt die Stufe unter Lock an den Job an, sodass ein
     parallel laufendes GET /api/jobs/{id} sie sofort sieht.
 
-    Reihenfolge der Kette (siehe stages.PIPELINE):
+    Wertungspfad (stages.PIPELINE), und nur diese drei sind eine Kette:
         1. Hochgeladenes Bild
-        2. Lungenmaske (U-Net)             (Entwicklungsstufe, s. stages.py)
-        3. Quadratischer Zuschnitt         (Entwicklungsstufe)
-        4. Modelleingabe 224x224 (CLAHE + Per-Bild-Standardisierung)
-        5. Grad-CAM
+        2. Modelleingabe 224x224 (CLAHE + Per-Bild-Standardisierung)
+        3. Grad-CAM
 
-    Stufe 2 und 3 sind ausdruecklich NICHT im Wertungspfad: klassifiziert wird
-    das Vollbild, genau so wie trainiert wurde. Sie werden echt gerechnet und
-    als `status: "explored"` gekennzeichnet, damit die Kette nicht mehr behauptet
-    als sie tut.
+    Daneben (stages.ASIDES), ausdruecklich KEIN Kettenglied:
+        Lungenmaske (U-Net), `group: "aside"`
+
+    Klassifiziert wird das Vollbild, genau so wie trainiert wurde: `transform`
+    aus data.py ist dasselbe Objekt, das auch der Trainingsloader benutzt, und
+    es enthaelt weder Maske noch Zuschnitt. Die Maske wird echt gerechnet und
+    gezeigt, beruehrt den Score aber nicht.
+
+    Die Zuschnitt-Stufe ist entfallen. Sie stand zwischen Maske und
+    Modelleingabe und legte damit nahe, der Zuschnitt werde klassifiziert; genau
+    diese Lesart ist beim Lesen der Oberflaeche aufgetreten. `render_crop` in
+    stages.py bleibt fuer die Messungen erhalten, wird hier aber nicht gerufen.
     """
     t0 = time.time()
 
@@ -206,7 +213,10 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
         _emit("upload", pipeline_stages.render_original(pil_img),
               ms=_stage_ms(ts), size=list(pil_img.size))
 
-        # --- 2 + 3: Maske und Zuschnitt (nur zur Anschauung) -------------
+        # --- Nebenschauplatz: Lungenmaske ---------------------------------
+        # Traegt `group: "aside"` und wird von der Oberflaeche in einer eigenen
+        # Karte gezeigt, nicht als Glied der Kette. Faellt sie aus, laeuft der
+        # Wertungspfad unveraendert weiter.
         mask = None
         ts = time.time()
         try:
@@ -221,14 +231,7 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
         else:
             _emit("mask", None, skipped=True, reason="Segmentation model not available.")
 
-        if mask is not None:
-            ts = time.time()
-            crop_b64, box = pipeline_stages.render_crop(pil_img, mask)
-            _emit("crop", crop_b64, ms=_stage_ms(ts), box=box)
-        else:
-            _emit("crop", None, skipped=True, reason="Needs a lung mask.")
-
-    # --- 4: Modelleingabe --------------------------------------------------
+    # --- 2: Modelleingabe --------------------------------------------------
     ts = time.time()
     input_tensor = transform(pil_img).unsqueeze(0)  # (1, 3, 224, 224)
     if emit is not None:
@@ -539,11 +542,17 @@ def get_pipeline():
     """Die Kette ohne Bilder: Titel, Beschriftung und Status je Stufe.
 
     Damit kann die Oberflaeche die leere Kette samt Pfeilen schon zeichnen,
-    bevor ueberhaupt ein Bild hochgeladen wurde. `status: "explored"` markiert
-    die Stufen, die untersucht und wieder verworfen wurden.
+    bevor ueberhaupt ein Bild hochgeladen wurde.
+
+    `stages` ist ausschliesslich der Wertungspfad, also genau die Stufen,
+    zwischen denen ein Pfeil zu Recht steht. `asides` sind Rechnungen, die auf
+    demselben Bild laufen und gezeigt werden, aber den Score nicht beruehren;
+    sie gehoeren in eine eigene Karte und nicht in die Reihe. `status:
+    "explored"` markiert dort weiterhin, was untersucht und verworfen wurde.
     """
     return {
         "stages": pipeline_stages.PIPELINE,
+        "asides": pipeline_stages.ASIDES,
         "enabled": SHOW_STAGES,
         "segmentation": pipeline_stages.segmenter_status(),
     }

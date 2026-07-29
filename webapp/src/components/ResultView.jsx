@@ -100,21 +100,6 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
         )}
       </div>
 
-      <div className="honesty">
-        <p>
-          <strong>No verdict is shown, on purpose.</strong> This is a research
-          demonstrator, not a diagnostic tool, and it reports a probability rather than a
-          label.
-        </p>
-        <p>
-          A low score does not rule out pneumonia. When this project carried its decision
-          threshold from one dataset to another,{" "}
-          <strong>half of the images the model called negative did have pneumonia</strong>{" "}
-          (NPV 0.500). The ranking transferred, the calibration did not, and turning this
-          score into a yes or no would rest on exactly the part that failed.
-        </p>
-      </div>
-
       <div className="heatmap-area">
         <div className="heatmap-stack">
           {baseSrc && <img className="heatmap-base" src={baseSrc} alt="Original X-ray" />}
@@ -147,6 +132,23 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
           rather than a sharp finding: measurements in this project showed that the evidence
           the model uses is spread out and partly outside the lungs. Read it as a
           plausibility check on the model, not as a marked lesion.
+        </p>
+      </div>
+
+      {/* Last block in the card, under the score and the heatmap, so it is the
+          note the reader leaves with. */}
+      <div className="honesty">
+        <p>
+          <strong>No verdict is shown, on purpose.</strong> This is a research
+          demonstrator, not a diagnostic tool, and it reports a probability rather than a
+          label.
+        </p>
+        <p>
+          A low score does not rule out pneumonia. When this project carried its decision
+          threshold from one dataset to another,{" "}
+          <strong>half of the images the model called negative did have pneumonia</strong>{" "}
+          (NPV 0.500). The ranking transferred, the calibration did not, and turning this
+          score into a yes or no would rest on exactly the part that failed.
         </p>
       </div>
 
