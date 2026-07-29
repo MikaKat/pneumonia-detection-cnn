@@ -68,6 +68,8 @@ CLI:
 
 from __future__ import annotations
 
+import _repo_path  # noqa: F401  (setzt sys.path fuer die Nachbarordner)
+
 import argparse
 import sys
 from pathlib import Path
@@ -178,7 +180,15 @@ def report(rows: list[dict], name_a: str, name_b: str) -> None:
     print(f"  {name_a:<12} {ma:.4f} +- {sa:.4f}   (reference {PRIMAER_BASIS:.4f})")
     print(f"  {name_b:<12} {mb:.4f} +- {sb:.4f}")
     print(f"  difference   {md:+.4f} +- {sd:.4f}   paired t = {t:+.2f}")
-    print(f"  (with five folds, |t| > 2.78 is the 5 % limit)")
+    if len(rows) < 2:
+        print(f"  ONE FOLD ONLY. The t value is undefined, not zero, and the "
+              f"+- 0.0000 above")
+        print(f"  is an artefact of n = 1, not agreement. At least three folds "
+              f"are needed")
+        print(f"  before the difference of {md:+.4f} counts as more than a "
+              f"direction.")
+    else:
+        print(f"  (with five folds, |t| > 2.78 is the 5 % limit)")
 
     print("\n--- SECONDARY: stratified AUC, must not collapse ---")
     ma, sa = cv_mean(rows, "strat_a")
@@ -190,23 +200,38 @@ def report(rows: list[dict], name_a: str, name_b: str) -> None:
     print(f"  difference   {md:+.4f} +- {sd:.4f}   paired t = {t2:+.2f}")
 
     print("\n--- Reading, fixed in advance ---")
+    # The wording used to name the crop, because the crop was the only variant
+    # this script had ever been pointed at. It then fired verbatim on the
+    # --balance-view run and read as approval of an experiment whose
+    # pre-registration says something else. The verdict now speaks about
+    # "variant B", so the reader has to go and look up what B was rather than
+    # being handed a conclusion written for a different question.
     view_d = cv_mean(rows, "view_d")[0]
     strat_d = cv_mean(rows, "strat_d")[0]
+    # NaN compares false against everything, so an undefined secondary
+    # endpoint would silently fall through to the "bought, not won" branch and
+    # read like a measured statement. Say so instead.
+    if view_d != view_d or strat_d != strat_d:
+        print("  NO VERDICT: one of the two endpoints is undefined (a stratum")
+        print("  with only one class, or no fold in common). Check the inputs.")
+        return
     if view_d < -0.02 and strat_d > -0.015:
-        print("  The crop lowers the dependence on the confounder without")
-        print("  costing discriminative power. That is the result it was built")
-        print("  for; this is the variant for the long training run.")
+        print(f"  {name_b} lowers the dependence on the confounder without")
+        print("  costing discriminative power on the SECONDARY endpoint.")
     elif view_d < -0.02:
-        print("  The confounder falls, but the stratified AUC falls with it.")
-        print("  Bought, not won. Report both numbers together.")
+        print(f"  {name_b} lowers the confounder, and the stratified AUC falls")
+        print("  with it. Bought, not won. Report both numbers together.")
     elif abs(view_d) <= 0.02:
-        print("  The crop does not change the dependence on the confounder.")
-        print("  That refutes the rationale of the crop: a negative result")
-        print("  backed by evidence, not a failure.")
+        print(f"  {name_b} does not change the dependence on the confounder.")
+        print("  That refutes its rationale: a negative result backed by")
+        print("  evidence, not a failure.")
     else:
-        print("  The dependence RISES. The crop re-encodes the framing")
-        print("  instead of removing it. First check whether the cut really")
-        print("  was square.")
+        print(f"  The dependence RISES under {name_b}. The channel is being")
+        print("  re-encoded instead of removed.")
+    print("  This verdict covers the two endpoints above and NOTHING else.")
+    print("  Grad-CAM, sensitivity gap and the perturbations live in")
+    print("  results_rsna.csv and have to be read there before any variant")
+    print("  is called the winner.")
 
 
 def main(argv=None) -> int:

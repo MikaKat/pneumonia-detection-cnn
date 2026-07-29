@@ -62,8 +62,10 @@ def _stub_torch() -> None:
 _stub_torch()
 
 import _repo_path  # noqa: F401  (sets sys.path)
-from rsna_train import (BOX_SPACE, MaskCorners, load_boxes,  # noqa: E402
-                        stratified_scores, youden_threshold)
+from rsna_train import (BOX_SPACE, MaskCorners, balance_report,  # noqa: E402
+                        effective_n, load_boxes, residual_view_label_auc,
+                        stratified_scores, train_loader_kwargs,
+                        view_balance_weights, youden_threshold)
 
 
 def box_mask(boxes, size):
@@ -261,6 +263,203 @@ def test_bce_from_probs() -> None:
               - bce_from_probs(np.array([0.0]), np.array([0.3]), 1.0)) < 1e-12)
 
 
+def test_view_balance_weights() -> None:
+    """The reweighting behind --balance-view.
+
+    The silent failure this guards against: a weight scheme that looks
+    plausible in the printed table but leaves part of the projection-label
+    association standing, or that quietly also rebalances the classes and so
+    corrects the imbalance twice once `pos_weight` is applied on top. Neither
+    shows up in the training log. Both show up here.
+    """
+    print("\ntest_view_balance_weights")
+
+    # The real cell counts of the development set, so the numbers in the module
+    # header are checked and not just asserted there.
+    vp = np.array(["AP"] * 10434 + ["PA"] * 12438)
+    y = np.array([0] * 6436 + [1] * 3998 + [0] * 11282 + [1] * 1156)
+    w = view_balance_weights(y, vp)
+    cell = {(r["viewpos"], r["target"]): r["weight"]
+            for r in balance_report(w, y, vp)}
+    for (v, t), want in {("AP", 0): 1.256, ("AP", 1): 0.588,
+                         ("PA", 0): 0.854, ("PA", 1): 2.424}.items():
+        check(f"weight {v}/{t} matches the module header",
+              abs(cell[(v, t)] - want) < 5e-3, f"{cell[(v, t)]:.3f}")
+
+    # 1. The association is gone: weighted, every cell holds exactly the count
+    #    expected under independence.
+    n = len(y)
+    worst = 0.0
+    for v in ("AP", "PA"):
+        for t in (0, 1):
+            m = (vp == v) & (y == t)
+            got = w[m].sum()
+            want = (vp == v).sum() * (y == t).sum() / n
+            worst = max(worst, abs(got - want))
+    check("weighted cells equal the independence expectation", worst < 1e-6,
+          f"largest deviation {worst:.2e}")
+
+    # 2. Both marginals survive. This is what keeps pos_weight valid: if the
+    #    weighting also shifted the prevalence, the class imbalance would be
+    #    corrected once here and once in the loss.
+    check("projection marginal unchanged",
+          abs(w[vp == "AP"].sum() - (vp == "AP").sum()) < 1e-6)
+    check("prevalence unchanged",
+          abs(w[y == 1].sum() / w.sum() - (y == 1).mean()) < 1e-9,
+          f"{w[y == 1].sum() / w.sum():.6f} against {(y == 1).mean():.6f}")
+
+    # 3. Weights sum to n, so an epoch keeps its length.
+    check("weights sum to n", abs(w.sum() - n) < 1e-6)
+
+    # 4. The price tag, and that it is a price and not a gain.
+    ne = effective_n(w)
+    check("effective sample size below n", ne < n, f"{ne:.0f} of {n}")
+    check("effective sample size as documented", abs(ne - 19698) < 5,
+          f"{ne:.0f}")
+    check("equal weights give back n exactly",
+          abs(effective_n(np.ones(500)) - 500) < 1e-9)
+
+    # 5. Degenerate inputs must be no-ops, not crashes. A fold that happens to
+    #    hold one projection only would otherwise divide by zero.
+    one_view = view_balance_weights(np.array([0, 1, 1, 0]),
+                                    np.array(["AP"] * 4))
+    check("single projection is a no-op", np.allclose(one_view, 1.0))
+    one_class = view_balance_weights(np.zeros(4, int),
+                                     np.array(["AP", "AP", "PA", "PA"]))
+    check("single class is a no-op", np.allclose(one_class, 1.0))
+    check("empty input returns empty",
+          view_balance_weights(np.zeros(0, int), np.zeros(0, str)).size == 0)
+
+    # 6. An unknown ViewPosition forms its own stratum instead of being
+    #    silently merged into AP or PA.
+    mixed_vp = np.array(["AP", "AP", "PA", "PA", "?", "?"])
+    mixed_y = np.array([0, 1, 0, 1, 0, 1])
+    wm = view_balance_weights(mixed_y, mixed_vp)
+    check("unknown projection is its own stratum", np.allclose(wm, 1.0),
+          "balanced input stays balanced")
+
+
+def test_balance_strength() -> None:
+    """The dial between baseline and full independence.
+
+    The silent failure here: `w ** a` no longer sums to n, so without
+    renormalisation the epoch would quietly change length with the setting and
+    a dose-response curve would confound dose with training time. That is
+    invisible in the printed weight table and visible here.
+    """
+    print("\ntest_balance_strength")
+    vp = np.array(["AP"] * 10434 + ["PA"] * 12438)
+    y = np.array([1] * 3998 + [0] * 6436 + [1] * 1156 + [0] * 11282)
+    n = len(y)
+
+    # The dose axis has to reproduce the two anchors of the project.
+    check("untouched stream reproduces the documented 0.706",
+          abs(residual_view_label_auc(y, vp) - 0.706) < 5e-4,
+          f"{residual_view_label_auc(y, vp):.4f}")
+    w1 = view_balance_weights(y, vp, 1.0)
+    check("full strength gives exactly 0.500",
+          abs(residual_view_label_auc(y, vp, w1) - 0.5) < 1e-9)
+
+    w0 = view_balance_weights(y, vp, 0.0)
+    check("strength 0 is the untouched baseline", np.allclose(w0, 1.0))
+    check("strength 1 equals the default",
+          np.allclose(w1, view_balance_weights(y, vp)))
+
+    # Every setting must keep the epoch the same length.
+    for a in (0.0, 0.25, 0.5, 0.75, 1.0):
+        w = view_balance_weights(y, vp, a)
+        if abs(w.sum() - n) > 1e-6:
+            check(f"weights sum to n at strength {a}", False, f"{w.sum():.1f}")
+            break
+    else:
+        check("weights sum to n at every strength", True)
+
+    # Monotone in both directions, which is what makes it a dose axis.
+    res = [residual_view_label_auc(y, vp, view_balance_weights(y, vp, a))
+           for a in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    ne = [effective_n(view_balance_weights(y, vp, a))
+          for a in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    check("residual association falls monotonically",
+          all(x > z for x, z in zip(res, res[1:])),
+          " ".join(f"{r:.3f}" for r in res))
+    check("effective sample size falls monotonically",
+          all(x > z for x, z in zip(ne, ne[1:])),
+          " ".join(f"{v:.0f}" for v in ne))
+    check("half strength halves the association roughly",
+          abs((res[2] - 0.5) / (res[0] - 0.5) - 0.5) < 0.10,
+          f"{(res[2] - 0.5) / (res[0] - 0.5):.2f} of the original gap")
+
+
+def test_balance_flag_is_inert_when_off() -> None:
+    """With the flag off the run has to be the baseline, bit for bit.
+
+    The paired comparison is only worth anything if the two runs differ in the
+    tested quantity and in nothing else. So the off path must not compute
+    weights, must not build a sampler and above all must not touch the random
+    number generators, since a single extra draw would shift the whole shuffle
+    order and with it the result.
+    """
+    print("\ntest_balance_flag_is_inert_when_off")
+    y = np.array([0, 1, 0, 1, 1, 0])
+    vp = np.array(["AP", "AP", "PA", "PA", "AP", "PA"])
+
+    off = train_loader_kwargs(None, seed=0)
+    check("off yields exactly shuffle=True", off == {"shuffle": True}, str(off))
+
+    # `_stub_torch` leaves a placeholder module behind when torch is genuinely
+    # missing, so a bare `import torch` succeeds and then fails on the first
+    # attribute. Ask for what is actually needed instead.
+    try:
+        import torch
+        torch.Generator
+    except (ImportError, AttributeError):
+        print("  skip  sampler path (torch not installed)")
+        return
+
+    # The RNG must be in the same state before and after the off call.
+    torch.manual_seed(123)
+    before = torch.randint(0, 2 ** 31, (1,)).item()
+    torch.manual_seed(123)
+    train_loader_kwargs(None, seed=0)
+    after = torch.randint(0, 2 ** 31, (1,)).item()
+    check("off does not advance the torch RNG", before == after)
+
+    w = view_balance_weights(y, vp)
+    on = train_loader_kwargs(w, seed=0)
+    check("on yields a sampler and no shuffle",
+          "sampler" in on and "shuffle" not in on, str(list(on)))
+    check("sampler draws one epoch worth of images",
+          on["sampler"].num_samples == len(y))
+    check("sampler draws with replacement", on["sampler"].replacement)
+
+    # Same seed, same draw. Otherwise a rerun is not a rerun.
+    a = list(train_loader_kwargs(w, seed=7)["sampler"])
+    b = list(train_loader_kwargs(w, seed=7)["sampler"])
+    c = list(train_loader_kwargs(w, seed=8)["sampler"])
+    check("same seed gives the same draw", a == b)
+    check("a different seed gives a different draw", a != c)
+
+    # THE regression test. train_loader_kwargs used to take (y, vp, strength)
+    # and recompute the weights itself; main printed its table from one call
+    # and built the sampler from another, and the sampler call was left without
+    # the strength argument. A run announced strength 0.5 and trained at 1.0
+    # for 74 minutes. The signature now takes the finished array, so the two
+    # cannot come apart, and this checks that the array actually reaches the
+    # sampler unchanged.
+    w05 = view_balance_weights(y, vp, 0.5)
+    s05 = train_loader_kwargs(w05, seed=0)["sampler"]
+    s10 = train_loader_kwargs(view_balance_weights(y, vp, 1.0),
+                              seed=0)["sampler"]
+    check("the sampler carries the weights it was handed",
+          np.allclose(np.asarray(s05.weights, dtype=float), w05))
+    check("different strengths give different samplers",
+          not np.allclose(np.asarray(s05.weights, dtype=float),
+                          np.asarray(s10.weights, dtype=float)))
+    check("and therefore a different draw",
+          list(s05) != list(train_loader_kwargs(
+              view_balance_weights(y, vp, 1.0), seed=0)["sampler"]))
+
+
 if __name__ == "__main__":
     test_box_geometry()
     test_mask_corners()
@@ -268,6 +467,9 @@ if __name__ == "__main__":
     test_threshold_per_view()
     test_boxes_and_threshold()
     test_bce_from_probs()
+    test_view_balance_weights()
+    test_balance_strength()
+    test_balance_flag_is_inert_when_off()
     print("\n" + ("ALL TESTS PASSED" if not FAILED
                   else f"{len(FAILED)} FAILED: {FAILED}"))
     raise SystemExit(1 if FAILED else 0)

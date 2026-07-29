@@ -76,6 +76,8 @@ CLI:
 
 from __future__ import annotations
 
+import _repo_path  # noqa: F401  (setzt sys.path fuer die Nachbarordner)
+
 import argparse
 import glob as globmod
 import json

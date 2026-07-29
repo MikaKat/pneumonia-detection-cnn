@@ -344,11 +344,11 @@ result, including which value is the null and what would falsify the claim.
 
 ```bash
 # reproduce the headline
-python rsna_metadata_leak_check.py          # the null hypothesis, first
-python rsna_splits.py
-python rsna_prepare.py
-for f in 0 1 2 3 4; do python rsna_train.py --fold $f --device directml; done
-python rsna_external_kermany.py
+python rsna/befunde/rsna_metadata_leak_check.py          # the null hypothesis, first
+python rsna/pipeline/rsna_splits.py
+python rsna/pipeline/rsna_prepare.py
+for f in 0 1 2 3 4; do python rsna/pipeline/rsna_train.py --fold $f --device directml; done
+python rsna/befunde/rsna_external_kermany.py
 ```
 
 ---
