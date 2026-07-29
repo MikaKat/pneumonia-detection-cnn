@@ -1,27 +1,41 @@
 """
-Grad-CAM zum Anschauen -- mit eingezeichneten Bounding Boxes.
+Grad-CAM for visual inspection, with bounding boxes drawn in.
 
-Die Zahl steht schon fest (Treffer 0,539 gegen Zufall 0,117, Faktor 4,6 ueber
-fuenf Folds). Dieses Skript liefert das Bild dazu, und zwar so, dass es nicht
-schmeichelt:
+Grad-CAM reads a trained classifier backwards and returns a coarse heat map of
+the image regions that drove its score. The number is already settled (hit
+rate 0.539 against chance 0.117, a factor of 4.6 over five folds). This script
+supplies the picture that goes with it, laid out so that it cannot flatter:
 
-  * Die **Bounding Box wird eingezeichnet**. Eine Heatmap ohne Referenz sieht
-    immer plausibel aus -- das Auge findet nachtraeglich einen Grund, warum die
-    warme Stelle richtig liegt. Mit Box ist der Vergleich vorgegeben.
-  * Das **Maximum der Heatmap wird markiert** (das ist die Groesse, die in die
-    Trefferquote eingeht -- nicht der optische Schwerpunkt).
-  * Es werden **Treffer UND Fehlschlaege** gezeigt, in getrennten Zeilen und in
-    der gemessenen Mischung. Wer nur die gelungenen Beispiele zeigt, berichtet
-    eine Trefferquote von 1,0.
-  * Optional eine Zeile **Negative** (`--negatives`): dort gibt es keine Box,
-    und die Frage ist, ob die Karte diffus bleibt oder trotzdem irgendwohin
-    zeigt.
+  * The bounding box is drawn in. A heat map without a reference always looks
+    plausible, because the eye finds a reason after the fact for why the warm
+    spot sits where it does. With the box, the comparison is fixed in advance.
+  * The maximum of the heat map is marked. That is the quantity the hit rate
+    is computed from, not the visual centre of mass.
+  * Hits AND misses are shown, in separate rows and in the measured mixture.
+    Showing only the successful examples reports a hit rate of 1.0.
+  * Optionally a row of negatives (`--negatives`): there is no box there, and
+    the question is whether the map stays diffuse or points somewhere anyway.
 
-Laeuft auf der CPU, ein paar Sekunden je Bild.
+Interpreting the output
+-----------------------
+Each panel is titled with the predicted probability, the projection and, for
+cases that have a box, whether the marked heat-map maximum falls inside it,
+plus the image fraction the box covers. That fraction is the reference value:
+it is how often a maximum placed at random would land inside the box, so the
+measured hit rate only means something insofar as it exceeds it. The rows are
+read against each other. If the hit row looks no better targeted than the miss
+row, the hit rate is not supported by what the maps show, and the claim that
+the model attends to the finding fails. The negatives row has no reference
+box. A map that stays diffuse there is consistent with there being nothing to
+point at; one that concentrates sharply marks a case to follow up. Nothing is
+measured here. The grid only checks whether the number means what it appears
+to mean.
+
+Runs on the CPU, a few seconds per image.
 
 CLI:
   python rsna_gradcam_grid.py --fold 0 --n 6
-  python rsna_gradcam_grid.py --fold 3 --n 6 --negatives    # bester CAM-Fold
+  python rsna_gradcam_grid.py --fold 3 --n 6 --negatives    # best CAM fold
 """
 
 from __future__ import annotations
@@ -75,9 +89,9 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--ckpt", type=Path, default=None)
     p.add_argument("--size", type=int, default=224)
-    p.add_argument("--n", type=int, default=6, help="Bilder je Zeile")
+    p.add_argument("--n", type=int, default=6, help="images per row")
     p.add_argument("--negatives", action="store_true",
-                   help="dritte Zeile mit Negativen (dort gibt es keine Box)")
+                   help="third row with negatives (there is no box there)")
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
 
@@ -100,9 +114,9 @@ def main() -> None:
     tf = build_transforms(args.size, False)
     s = args.size / BOX_SPACE
 
-    # Die Vorauswahl kommt aus der gespeicherten CAM-Auswertung, sofern
-    # vorhanden -- so zeigt das Bild dieselben Faelle, die in die Zahl
-    # eingegangen sind, statt einer neuen, guenstiger gewuerfelten Stichprobe.
+    # The pre-selection comes from the stored CAM evaluation where one exists,
+    # so the figure shows the same cases that went into the number instead of
+    # a fresh and more favourably drawn sample.
     import pandas as pd
     cam_csv = Path(f"predictions_rsna/cam_f{args.fold}_s{args.seed}.csv")
     rng = np.random.default_rng(args.seed)
@@ -110,18 +124,18 @@ def main() -> None:
         c = pd.read_csv(cam_csv)
         hits = c[c.hit].patientId.tolist()
         miss = c[~c.hit].patientId.tolist()
-        print(f"aus {cam_csv.name}: {len(hits)} Treffer, {len(miss)} Fehlschlaege "
+        print(f"from {cam_csv.name}: {len(hits)} hits, {len(miss)} misses "
               f"({len(hits) / len(c):.3f})")
     else:
         pos = [i for i in val if i in boxes]
         hits, miss = pos, pos
-        print("keine CAM-CSV gefunden -- Faelle werden zufaellig gezogen")
+        print("no CAM CSV found, cases are drawn at random")
 
     rows = [("Treffer", list(rng.choice(hits, min(args.n, len(hits)), replace=False))),
             ("Fehlschlag", list(rng.choice(miss, min(args.n, len(miss)), replace=False)))]
     if args.negatives:
         neg = [i for i in val if labels[i] == 0]
-        rows.append(("negativ (keine Box)",
+        rows.append(("negative (no box)",
                      list(rng.choice(neg, min(args.n, len(neg)), replace=False))))
 
     fig, axes = plt.subplots(len(rows), args.n,
@@ -142,14 +156,14 @@ def main() -> None:
             draw(axes[r, cix], base, heat, bxs, args.size, info)
             if cix == 0:
                 axes[r, cix].set_ylabel(name, fontsize=10)
-        print(f"  Zeile '{name}' fertig")
+        print(f"  row '{name}' done")
 
-    fig.suptitle(f"Grad-CAM, Fold {args.fold} | gruen = Bounding Box, "
-                 f"+ = Maximum der Heatmap (das zaehlt fuer die Trefferquote)",
+    fig.suptitle(f"Grad-CAM, fold {args.fold} | green = bounding box, "
+                 f"+ = heat-map maximum (this is what counts for the hit rate)",
                  fontsize=11)
     fig.tight_layout()
     fig.savefig(out, dpi=110)
-    print(f"\ngespeichert: {out}")
+    print(f"\nsaved: {out}")
 
 
 if __name__ == "__main__":

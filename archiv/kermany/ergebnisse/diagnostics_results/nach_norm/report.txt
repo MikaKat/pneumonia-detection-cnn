@@ -1,0 +1,79 @@
+################################################################
+# Diagnostik-Lauf: nach_norm
+# Checkpoint: checkpoints/best_model_v3.pth
+# Datum: 2026-07-24 12:27:12
+################################################################
+
+=== Test 0: Klassifikations-Metriken auf dem Test-Set ===
+Quantitative Leistung (Konfusionsmatrix, Sensitivitaet/Spezifitaet, AUC,
+Youden-Schwellenwert) - damit De-Bias-Effekte auch an harten Zahlen sichtbar werden.
+Konfusionsmatrix (Zeilen=wahr, Spalten=Vorhersage):
+[[167  67]
+ [ 20 370]]
+Sensitivität (Recall PNEU): 0.9487
+Spezifität:                 0.7137
+AUC:                        0.9423
+
+              precision    recall  f1-score   support
+
+      NORMAL       0.89      0.71      0.79       234
+   PNEUMONIA       0.85      0.95      0.89       390
+
+    accuracy                           0.86       624
+   macro avg       0.87      0.83      0.84       624
+weighted avg       0.86      0.86      0.86       624
+
+Bester Schwellenwert (Youden J): 0.8707
+  -> Sensitivität: 0.8538, Spezifität: 0.9060
+Konfusionsmatrix bei diesem Schwellenwert:
+[[212  22]
+ [ 57 333]]
+
+=== Test 1: CAM-Vergleich (Grad-CAM / Grad-CAM++ / HiResCAM) ===
+Alle Heatmaps erklaeren die PNEUMONIA-Klasse. Grad-CAM==HiResCAM ist bei
+ResNet (GAP->fc) erwartbar und belegt, dass das CAM 'faithful' ist.
+  -> gespeichert: cam_compare.png
+
+=== Test 2: Layer-Vergleich (layer4 7x7 / layer3 14x14 / layer2 28x28) ===
+Grad-CAM auf verschiedenen Bloecken. Tiefer = grober, aber semantischer.
+HiResCAM hier bewusst nicht: seine Faithfulness gilt nur vor dem GAP.
+  -> gespeichert: cam_layers.png
+
+=== Test 3: Occlusion (komplett / nur Zentrum / nur Rand) ===
+Welcher Bildteil traegt die Vorhersage? Kollabiert die Separation bei
+'nur Zentrum' UND 'nur Rand', ist das Signal weder rein zentral noch
+rein am Rand lokalisiert - Hinweis auf globale/grobe Merkmale.
+
+Variante        P(PNEU|NORMAL)    P(PNEU|PNEU)    Separation
+------------------------------------------------------------
+komplett                 0.247           0.934         0.687
+nur Zentrum              0.447           0.863         0.417
+nur Rand                 0.497           0.901         0.403
+------------------------------------------------------------
+
+=== Test 4: Statistik-Test (Einzelmerkmal-Trennkraft) ===
+Wie gut trennt EINE globale Zahl die Klassen? AUC nahe 0/1 = starker
+Datensatz-Confounder. Merkmal ist bei AUC<0.5 in Pneumonie NIEDRIGER.
+
+Merkmal            mean NORMAL     mean PNEU     AUC  Trennkraft
+----------------------------------------------------------------
+mean_intensity           0.492         0.462   0.378       0.245
+contrast                 0.235         0.211   0.266       0.467
+black_frac               0.081         0.053   0.327       0.346
+----------------------------------------------------------------
+  -> gespeichert: bias_stats.png
+
+=== Test 5: Blur-Test (Separation vs. Weichzeichnung) ===
+Starker Blur zerstoert feine Anatomie, laesst Grobstatistik intakt.
+Bleibt die Separation hoch, reicht dem Modell die Grobstruktur.
+Blur wird NACH CLAHE angewandt (sonst schaerft CLAHE ihn wieder auf).
+
+Blur-Radius   P(PNEU|NORMAL)    P(PNEU|PNEU)    Separation
+----------------------------------------------------------
+0                      0.247           0.934         0.687
+2                      0.853           0.956         0.103
+4                      0.960           0.981         0.021
+8                      0.884           0.937         0.053
+16                     0.719           0.701        -0.019
+----------------------------------------------------------
+  -> gespeichert: blur_test.png

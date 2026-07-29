@@ -1,0 +1,53 @@
+################################################################
+# Diagnostik-Lauf: baseline
+# Checkpoint: best_model.pth
+# Datum: 2026-07-24 10:39:14
+################################################################
+
+=== Test 1: CAM-Vergleich (Grad-CAM / Grad-CAM++ / HiResCAM) ===
+Alle Heatmaps erklaeren die PNEUMONIA-Klasse. Grad-CAM==HiResCAM ist bei
+ResNet (GAP->fc) erwartbar und belegt, dass das CAM 'faithful' ist.
+  -> gespeichert: cam_compare.png
+
+=== Test 2: Layer-Vergleich (layer4 7x7 / layer3 14x14 / layer2 28x28) ===
+Grad-CAM auf verschiedenen Bloecken. Tiefer = grober, aber semantischer.
+HiResCAM hier bewusst nicht: seine Faithfulness gilt nur vor dem GAP.
+  -> gespeichert: cam_layers.png
+
+=== Test 3: Occlusion (komplett / nur Zentrum / nur Rand) ===
+Welcher Bildteil traegt die Vorhersage? Kollabiert die Separation bei
+'nur Zentrum' UND 'nur Rand', ist das Signal weder rein zentral noch
+rein am Rand lokalisiert - Hinweis auf globale/grobe Merkmale.
+
+Variante        P(PNEU|NORMAL)    P(PNEU|PNEU)    Separation
+------------------------------------------------------------
+komplett                 0.318           0.953         0.635
+nur Zentrum              0.951           0.980         0.029
+nur Rand                 0.992           0.996         0.004
+------------------------------------------------------------
+
+=== Test 4: Statistik-Test (Einzelmerkmal-Trennkraft) ===
+Wie gut trennt EINE globale Zahl die Klassen? AUC nahe 0/1 = starker
+Datensatz-Confounder. Merkmal ist bei AUC<0.5 in Pneumonie NIEDRIGER.
+
+Merkmal            mean NORMAL     mean PNEU     AUC  Trennkraft
+----------------------------------------------------------------
+mean_intensity           0.492         0.462   0.378       0.245
+contrast                 0.235         0.211   0.266       0.467
+black_frac               0.081         0.053   0.327       0.346
+----------------------------------------------------------------
+  -> gespeichert: bias_stats.png
+
+=== Test 5: Blur-Test (Separation vs. Weichzeichnung) ===
+Starker Blur zerstoert feine Anatomie, laesst Grobstatistik intakt.
+Bleibt die Separation hoch, reicht dem Modell die Grobstruktur.
+
+Blur-Radius   P(PNEU|NORMAL)    P(PNEU|PNEU)    Separation
+----------------------------------------------------------
+0                      0.318           0.953         0.635
+2                      0.344           0.957         0.613
+4                      0.417           0.973         0.556
+8                      0.675           0.986         0.311
+16                     0.958           0.996         0.038
+----------------------------------------------------------
+  -> gespeichert: blur_test.png

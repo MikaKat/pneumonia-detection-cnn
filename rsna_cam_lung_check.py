@@ -1,52 +1,88 @@
 """
-Schritt 9b: Diagnose ohne Retraining -- zeigt die Heatmap ueberhaupt in die Lunge?
+Step 9b: does the heat map point into the lung? Answered from the existing
+checkpoints, without retraining.
 
-Die Frage, die 11,5 Stunden Rechenzeit entscheidet
---------------------------------------------------
-Gemessen ist: das Maximum der Grad-CAM liegt in 53,9 % der Faelle in einer
-Bounding Box, Zufall waere 11,7 % -- Faktor 4,6. Die *Masse* der Karte liegt
-aber nur zu 19,2 % in den Boxen. Die Karte zeigt grob richtig hin und ist
-trotzdem diffus. Naheliegend waere ein Zuschnitt auf die Lunge (`crop`), damit
-das Modell Bildrand, Schultern und Abdomen gar nicht erst sieht -- 11,5 h ueber
-fuenf Folds. Vorher laesst sich mit den vorhandenen Checkpoints pruefen, ob er
-ueberhaupt etwas bewirken KANN.
+The question that decides 11.5 hours of compute
+-----------------------------------------------
+Grad-CAM reads a trained classifier backwards and returns, for one radiograph,
+a coarse heat map of the regions that drove its pneumonia score. The maximum
+of that map falls inside an annotated bounding box in 53.9 % of cases against
+a chance value of 11.7 %, a factor of 4.6. The *mass* of the map lies in the
+boxes only to 19.2 %. The map points in roughly the right direction and is
+diffuse at the same time. The next step on offer is a crop to the lung
+(`crop`), so that the model never sees image border, shoulders and abdomen in
+the first place, at a cost of 11.5 h over five folds. The checkpoints, the
+weights already written out by the finished training runs, allow a check of
+whether such a crop CAN change anything before that time is spent.
 
-JEDE ZAHL BRAUCHT IHREN NENNER -- die Lehre aus dem ersten Lauf
-----------------------------------------------------------------
-Die erste Fassung dieses Skripts hat gemeldet: "80,7 % der Fehlschlaege zeigen
-aus der Lunge heraus -> Crop gerechtfertigt". Diese Schwelle war ohne
-Nullhypothese gesetzt, und das war falsch. Der Zufallswert fuer "ausserhalb"
-ist 1 - Lungenflaeche, hier 0,792. Der Vorsprung betrug damit +0,014 +- 0,100
-(t = 0,32 ueber fuenf Folds) -- also nichts. Zum Vergleich: bei den TREFFERN
-lag das Maximum zu 0,858 in der Lunge gegen einen Zufall von 0,212.
+EVERY NUMBER NEEDS ITS DENOMINATOR
+----------------------------------
+An outside share means nothing until the share a random point would produce
+stands beside it. For "outside" that chance value is 1 - lung area, here
+0.792, and the measured lift over it is +0.014 +- 0.100 at t = 0.32 across
+five folds. Nothing. On the hits the same comparison comes out differently:
+maximum in the lung at 0.858 against a chance value of 0.212.
 
-Das Modell ist zweigipflig: entweder es findet die Pathologie (Maximum in der
-Lunge und in der Box), oder sein Maximum ist bezueglich der Anatomie Rauschen.
-Ein systematisches "schaut auf Rippen, Zwerchfell, Bildrand" existiert nicht --
-passend zur Ecken-Ablation von -0,0001.
+The model is bimodal. Either it finds the pathology, with the maximum in the
+lung and in the box, or its maximum is noise with respect to the anatomy. A
+systematic "looks at ribs, diaphragm, image border" does not exist, consistent
+with the corner ablation, where taking the corners out of the image and
+rescoring moved the result by -0.0001.
 
-Deshalb steht ab jetzt neben JEDER Aussenzahl ihre Baseline, und das Verdikt
-haengt am Vorsprung, nicht am Rohwert. Das gilt auch fuer den Spielraum: eine
-reine Zufalls-Heatmap gewinnt durch die Beschraenkung auf die Lunge +0,264,
-weil ihr Platz weggenommen wird. Ein beobachteter Gewinn muss dagegen gehalten
-werden, nicht gegen Null.
+Every outside number therefore carries its baseline beside it, and the verdict
+hangs on the lift, not on the raw value. The headroom is subject to the same
+rule. A purely random heat map gains +0.264 from being restricted to the lung,
+simply because space is taken away from it. An observed gain has to be held
+against that value, not against zero.
 
-ZWEI KONTROLLEN VOR JEDEM BEFUND
----------------------------------
-1. `box_in_lung` -- welcher Anteil der Bounding Box liegt in der Maske? Auf
-   Kermany wurden Pneumonie-Lungen untersegmentiert, weil eine Konsolidierung
-   dem U-Net nicht nach Lunge aussieht. Dann faellt die Pathologie aus der
-   Maske und "Maximum ausserhalb der Lunge" entsteht von selbst -- zirkulaer.
-2. `lung_area` -- anatomisch sind 0,30-0,40 zu erwarten. Der erste Lauf ergab
-   0,210. Eine zu kleine Maske treibt jede Aussenzahl UND den Spielraum nach
-   oben, ohne dass das Modell etwas damit zu tun haette.
+TWO CONTROLS BEFORE ANY FINDING
+-------------------------------
+1. `box_in_lung`: which share of the bounding box lies inside the mask? The
+   mask comes from a U-Net, a network that labels every pixel lung or not
+   lung. On Kermany, pneumonia lungs were undersegmented, because a
+   consolidation does not look like lung to it. The pathology then falls out
+   of the mask and "maximum outside the lung" arises by itself. Circular.
+2. `lung_area`: anatomically 0.30-0.40 is to be expected, and the measured
+   value is 0.210. A mask that is too small drives every outside number AND
+   the headroom upwards, without the model having anything to do with it.
 
-HEAT-CACHE
+HEAT CACHE
 ----------
-Die Heatmaps werden als float16 gecacht (~12 MB je Fold). Damit ist der
-Vergleich verschiedener Maskenvarianten ein Tabellen-Lookup in Sekunden statt
-20 Minuten CAM-Rechnung je Variante -- siehe `rsna_mask_sweep.py`. Dass das in
-der ersten Fassung fehlte, war ein Konstruktionsfehler.
+`--cache-heat` stores the heat maps as float16 (~12 MB per fold). The
+comparison of different mask variants then becomes a table lookup taking
+seconds instead of 20 minutes of CAM computation per variant, which is what
+`rsna_mask_sweep.py` uses.
+
+Interpreting the output
+-----------------------
+Every rate is printed beside its chance baseline, and only the lift between
+the two carries meaning. All figures are means +- SD over the folds, the five
+patient splits the model was trained and validated on, and the differences
+carry a paired t across folds (df = k-1, so |t| > 2.78 is the 5 % bound with
+five folds). A single-fold number decides nothing here, because fold
+difficulty varies more than the effects being measured.
+
+The report is to be read in this order:
+
+  1. Mask controls. If `box_in_lung` or `lung_area` fails its threshold, there
+     is no reading at all: a mask that is too small or displaced produces the
+     outside finding and the headroom on its own, and any interpretation would
+     be circular. Repair the mask first (`rsna_mask_sweep.py`).
+  2. Failures whose maximum lies outside the lung, against the chance value
+     1 - lung area. Only a lift with |t| > 2.78 shows that the model
+     systematically looks at ribs, diaphragm or image border.
+  3. Headroom, stated as two lifts, each against its own null: free
+     (hit rate - box area) and restricted (hit rate inside the lung minus
+     (box AND lung) / lung). Their difference is immune to the ceiling
+     objection, because both terms are distances to a matching null.
+
+The decision. A significant outside lift TOGETHER WITH a difference of the two
+lifts above the purely geometric gain argues FOR the crop run: the mechanism a
+crop addresses is then present, and the model is spending its attention on
+ribs, diaphragm or image border, which a crop removes from view. An outside
+share indistinguishable from chance, or a headroom that stays within plain
+area arithmetic, argues AGAINST it. The crop cannot help a model that already
+looks inside the lung and only in the wrong place, and the 11.5 h are saved.
 
 CLI:
   python rsna_cam_lung_check.py --folds 0 1 2 3 4 --n 120 --cache-heat
@@ -63,16 +99,22 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-LUNG_AREA_MIN = 0.26        # darunter ist die Maske anatomisch unplausibel klein
-BOX_IN_LUNG_MIN = 0.60      # darunter schneidet die Maske die Pathologie weg
+LUNG_AREA_MIN = 0.26        # below this the mask is anatomically implausibly small
+BOX_IN_LUNG_MIN = 0.60      # below this the mask cuts the pathology away
 
 
 # --------------------------------------------------------------------------
-# Geometrie und Auswertung  (torch-frei, damit testbar und im Sweep nutzbar)
+# Geometry and evaluation  (torch-free, so it stays testable and usable in the sweep)
 # --------------------------------------------------------------------------
 
 def box_mask(boxes, size: int, box_space: int) -> np.ndarray:
-    """Bounding Boxes aus dem 1024er-DICOM-Raster ins Modellraster (size)."""
+    """Bounding boxes from the 1024 px DICOM grid into the model grid (size).
+
+    Returns a boolean map that is True inside any annotated box. The boxes
+    carry the original DICOM resolution, and the model works on a smaller
+    grid, so without this rescaling every hit rate would be measured against
+    the wrong geometry.
+    """
     s = size / box_space
     m = np.zeros((size, size), bool)
     for bx, by, bw, bh in boxes:
@@ -83,20 +125,20 @@ def box_mask(boxes, size: int, box_space: int) -> np.ndarray:
 
 
 def analyse_one(heat: np.ndarray, box: np.ndarray, lung: np.ndarray) -> dict | None:
-    """Alle Kennzahlen fuer ein Bild.
+    """All metrics for one image.
 
-    `peak_in_box_lungrestricted` ist der Optimismus-Deckel: das Maximum wird nur
-    noch INNERHALB der Lunge gesucht. Das ist NICHT, was ein auf Zuschnitten
-    trainiertes Modell tut -- ein solches lernt andere Gewichte. Es ist die
-    Obergrenze dessen, was allein das Wegnehmen des Sichtfelds braechte.
+    `peak_in_box_lungrestricted` is the optimism ceiling: the maximum is
+    searched for only INSIDE the lung. A model trained on crops would do
+    something else, since it learns different weights from the start. This is
+    the upper bound on what taking away the field of view alone could deliver.
 
-    `null_restricted` ist der Nenner dazu: die Trefferquote eines ZUFAELLIGEN
-    Punktes innerhalb der Lunge, also (Box geschnitten Lunge) / Lunge. Ohne
-    diese Zahl sieht jeder Gewinn nach Modellverdienst aus, obwohl er blosse
-    Flaechenrechnung sein kann.
+    `null_restricted` is the matching denominator, the hit rate of a RANDOM
+    point inside the lung, that is (box intersected with lung) / lung. Without
+    that number every gain looks like model merit when it can be plain area
+    arithmetic.
 
-    Die Peak-Koordinaten werden mitgeschrieben, damit eine andere Maske
-    nachtraeglich ohne neue CAM-Rechnung bewertet werden kann.
+    The peak coordinates are recorded as well, so that a different mask can be
+    scored afterwards without a new CAM computation.
     """
     heat = np.clip(np.asarray(heat, dtype=float), 0, None)
     total = heat.sum()
@@ -111,7 +153,7 @@ def analyse_one(heat: np.ndarray, box: np.ndarray, lung: np.ndarray) -> dict | N
         peak_lr = bool(box[yx_l])
     else:
         yx_l = yx
-        peak_lr = bool(box[yx])           # keine Maske -> keine Einschraenkung
+        peak_lr = bool(box[yx])           # no mask -> no restriction
 
     box_a = float(box.mean())
     lung_a = float(lung.mean())
@@ -127,14 +169,20 @@ def analyse_one(heat: np.ndarray, box: np.ndarray, lung: np.ndarray) -> dict | N
         "box_area": box_a,
         "lung_area": lung_a,
         "box_in_lung": float((box & lung).sum() / box.sum()) if box.any() else np.nan,
-        # Nenner fuer den Spielraum: Zufallstreffer frei bzw. auf die Lunge beschraenkt
+        # Denominators for the headroom: chance hit free, and restricted to the lung
         "null_free": box_a,
         "null_restricted": float(min(inter / lung_a, 1.0)) if lung_a > 0 else box_a,
     }
 
 
 def summarise(df: pd.DataFrame) -> dict:
-    """Fold-Zusammenfassung. Jede Quote steht neben ihrer Baseline."""
+    """Fold summary. Every rate stands beside its baseline.
+
+    Takes the per-image table of one fold and returns a single row: the two
+    mask controls, the hit rates each with their chance value, and the two
+    lifts whose difference is the headroom. No rate is emitted alone. A raw
+    value on its own cannot be falsified; a lift against its null can.
+    """
     d = df.dropna(subset=["peak_in_box"])
     miss = d[~d["peak_in_box"].astype(bool)]
     hit = d[d["peak_in_box"].astype(bool)]
@@ -154,7 +202,7 @@ def summarise(df: pd.DataFrame) -> dict:
         "hit_in_lung_null": float(hit["lung_area"].mean()) if len(hit) else np.nan,
     }
 
-    # Der Bruch, um den es geht -- Rohwert UND Nenner.
+    # The fraction at issue, raw value AND denominator.
     if len(miss):
         out["miss_outside_lung"] = float((~miss["peak_in_lung"].astype(bool)).mean())
         out["miss_outside_null"] = float(1 - miss["lung_area"].mean())
@@ -165,23 +213,23 @@ def summarise(df: pd.DataFrame) -> dict:
 
     out["peak_in_box_lungrestricted"] = float(d["peak_in_box_lungrestricted"].mean())
     out["crop_headroom"] = out["peak_in_box_lungrestricted"] - out["peak_in_box"]
-    # Was dieselbe Beschraenkung einer Zufalls-Heatmap braechte:
+    # What the same restriction would deliver for a random heat map:
     out["null_free"] = float(d["null_free"].mean())
     out["null_restricted"] = float(d["null_restricted"].mean())
     out["headroom_null"] = out["null_restricted"] - out["null_free"]
 
-    # Dieselbe Groesse, anders gelesen -- und diese Lesart ist die belastbare.
+    # The same quantity in the reading that survives cross-examination.
     #
-    # Zugewinne zu vergleichen (Modell +0,080 gegen Zufall +0,264) ist
-    # angreifbar: das Modell startet bei 0,530, der Zufall bei 0,117, hat also
-    # weniger Luft nach oben. Der Einwand "Deckeneffekt" waere berechtigt.
+    # Comparing gains (model +0.080 against chance +0.264) is open to attack:
+    # the model starts at 0.530, chance at 0.117, so the model has less room
+    # above it. The objection "ceiling effect" would be justified.
     #
-    # Deshalb stattdessen zwei VORSPRUENGE, jeder gegen seine eigene Baseline:
-    #   frei         Trefferquote - Boxflaeche
-    #   beschraenkt  Trefferquote(nur Lunge) - (Box UND Lunge)/Lunge
-    # Beides sind Abstaende zur passenden Null und damit direkt vergleichbar.
-    # Algebraisch ist die Differenz identisch mit headroom_vs_null -- aber in
-    # dieser Form ist sie gegen den Deckeneinwand immun.
+    # Hence two LIFTS instead, each against its own baseline:
+    #   free        hit rate - box area
+    #   restricted  hit rate(lung only) - (box AND lung)/lung
+    # Both are distances to the matching null and therefore directly
+    # comparable. Algebraically the difference is identical to
+    # headroom_vs_null. In this form it is immune to the ceiling objection.
     out["lift_free"] = out["peak_in_box"] - out["null_free"]
     out["lift_restricted"] = out["peak_in_box_lungrestricted"] - out["null_restricted"]
     out["lift_delta"] = out["lift_restricted"] - out["lift_free"]
@@ -190,8 +238,9 @@ def summarise(df: pd.DataFrame) -> dict:
 
 
 def cv_mean(rows: list[dict], key: str) -> tuple[float, float]:
-    """Mittel +- SD ueber Folds. Nach dem Fold-0-gegen-Fold-1-Befund ist eine
-    Einzelfoldzahl nichts wert -- Absolutwerte nur als CV-Mittel."""
+    """Mean +- SD over the folds. A single-fold number is worth nothing here,
+    because fold difficulty varies more than the effects being measured, so
+    absolute values are reported only as a cross-validation mean."""
     v = np.array([r[key] for r in rows if key in r and not np.isnan(r[key])],
                  dtype=float)
     if v.size == 0:
@@ -200,9 +249,9 @@ def cv_mean(rows: list[dict], key: str) -> tuple[float, float]:
 
 
 def paired_t(rows: list[dict], key: str) -> float:
-    """Gepaartes t einer Differenzspalte ueber die Folds. df = k-1, bei fuenf
-    Folds ist |t| > 2,78 die 5-%-Grenze. Bewusst ohne scipy: eine einzelne
-    t-Statistik rechtfertigt keine zusaetzliche Abhaengigkeit."""
+    """Paired t of a difference column across the folds. df = k-1, so with five
+    folds |t| > 2.78 is the 5 % bound. Deliberately without scipy: a single
+    t statistic does not justify an additional dependency."""
     v = np.array([r[key] for r in rows if key in r and not np.isnan(r[key])],
                  dtype=float)
     if v.size < 2:
@@ -214,7 +263,7 @@ def paired_t(rows: list[dict], key: str) -> float:
 
 
 # --------------------------------------------------------------------------
-# Torch-Teil
+# Torch part
 # --------------------------------------------------------------------------
 
 def load_lung(masks: Path, pid: str, size: int) -> np.ndarray | None:
@@ -223,10 +272,10 @@ def load_lung(masks: Path, pid: str, size: int) -> np.ndarray | None:
         return None
     m = np.array(Image.open(p).convert("L"))
     if m.shape != (size, size):
-        # Kein stilles Resize: die Maske wird bewusst in Modellaufloesung
-        # erzeugt. Passt sie nicht, stimmt eine Annahme nicht.
-        raise ValueError(f"{p}: Maske ist {m.shape}, erwartet ({size}, {size}). "
-                         f"rsna_make_masks.py mit passender OUT_SIZE laufen lassen.")
+        # No silent resize. The mask is produced at model resolution on
+        # purpose, so a size that does not fit means an assumption is wrong.
+        raise ValueError(f"{p}: mask is {m.shape}, expected ({size}, {size}). "
+                         f"Run rsna_make_masks.py with a matching OUT_SIZE.")
     return m > 127
 
 
@@ -240,13 +289,13 @@ def run_fold(fold: int, args) -> pd.DataFrame:
     ckpt = Path(f"checkpoints/rsna_f{fold}_s{args.seed}.pth")
     cam_csv = Path(args.pred_dir) / f"cam_f{fold}_s{args.seed}.csv"
     if not ckpt.exists():
-        print(f"  Fold {fold}: Checkpoint fehlt ({ckpt}) -- uebersprungen.")
+        print(f"  Fold {fold}: checkpoint missing ({ckpt}), skipped.")
         return pd.DataFrame()
     if not cam_csv.exists():
-        print(f"  Fold {fold}: CAM-CSV fehlt ({cam_csv}) -- uebersprungen.")
+        print(f"  Fold {fold}: CAM CSV missing ({cam_csv}), skipped.")
         return pd.DataFrame()
 
-    # Dieselben Bilder wie in der berichteten Zahl, nicht neu gewuerfelt.
+    # The same images as in the reported number, not drawn afresh.
     stored = pd.read_csv(cam_csv)
     ids = stored["patientId"].astype(str).tolist()
     if args.n and args.n < len(ids):
@@ -288,33 +337,33 @@ def run_fold(fold: int, args) -> pd.DataFrame:
             print(f"    Fold {fold}: {j}/{len(ids)}")
 
     if no_mask:
-        print(f"  Fold {fold}: {no_mask} Bilder ohne Maske uebersprungen "
-              f"-- rsna_make_masks.py fuer diese IDs nachziehen.")
+        print(f"  Fold {fold}: {no_mask} images without a mask skipped. "
+              f"Run rsna_make_masks.py for these IDs.")
 
     if args.cache_heat and heats:
         out = Path(args.pred_dir) / f"cam_heat_f{fold}_s{args.seed}.npz"
         np.savez_compressed(out, ids=np.array(heat_ids), heat=np.stack(heats))
-        print(f"  Fold {fold}: Heat-Cache {out.name} "
-              f"({len(heats)} Karten, {out.stat().st_size / 1e6:.0f} MB)")
+        print(f"  Fold {fold}: heat cache {out.name} "
+              f"({len(heats)} maps, {out.stat().st_size / 1e6:.0f} MB)")
 
     df = pd.DataFrame(rows)
     if df.empty:
         return df
     df["fold"] = fold
 
-    # Gegenprobe gegen die gespeicherte Zahl: dieselben Bilder, derselbe
-    # Checkpoint, dieselbe Transform -- die Trefferquote MUSS wieder herauskommen.
+    # Cross-check against the stored number. Same images, same checkpoint and
+    # the same transform, so the hit rate MUST come out the same again.
     merged = df.merge(stored[["patientId", "hit"]], on="patientId", how="inner")
     if len(merged):
         agree = float((merged["peak_in_box"] == merged["hit"]).mean())
-        print(f"  Fold {fold}: Reproduktion der gespeicherten Trefferquote "
-              f"{agree:.3f} ueber {len(merged)} Bilder"
-              + ("" if agree > 0.98 else "   <-- ACHTUNG, sollte ~1.000 sein"))
+        print(f"  Fold {fold}: reproduction of the stored hit rate "
+              f"{agree:.3f} over {len(merged)} images"
+              + ("" if agree > 0.98 else "   <-- WARNING, should be ~1.000"))
     return df
 
 
 # --------------------------------------------------------------------------
-# Bericht
+# Report
 # --------------------------------------------------------------------------
 
 def _line(label: str, m: float, s: float, signed: bool = False) -> str:
@@ -324,119 +373,120 @@ def _line(label: str, m: float, s: float, signed: bool = False) -> str:
 
 def report(per_fold: list[dict]) -> None:
     if not per_fold:
-        print("Keine Ergebnisse.")
+        print("No results.")
         return
 
     print("\n" + "=" * 76)
-    print("KONTROLLEN ZUERST: taugt die Maske als Massstab?")
+    print("CONTROLS FIRST: is the mask usable as a yardstick?")
     print("=" * 76)
     bil, bil_s = cv_mean(per_fold, "box_in_lung")
     la, la_s = cv_mean(per_fold, "lung_area")
-    print(_line("Bounding Box innerhalb der Maske", bil, bil_s))
-    print(_line("Lungenflaeche (anatomisch ~0,30-0,40)", la, la_s))
+    print(_line("Bounding box inside the mask", bil, bil_s))
+    print(_line("Lung area (anatomically ~0.30-0.40)", la, la_s))
 
     mask_ok = True
     if bil < BOX_IN_LUNG_MIN:
         mask_ok = False
-        print(f"  -> box_in_lung < {BOX_IN_LUNG_MIN}: die Maske schneidet die "
-              f"Pathologie weg.")
+        print(f"  -> box_in_lung < {BOX_IN_LUNG_MIN}: the mask cuts the "
+              f"pathology away.")
     if la < LUNG_AREA_MIN:
         mask_ok = False
-        print(f"  -> Lungenflaeche < {LUNG_AREA_MIN}: die Maske ist zu klein. Sie")
-        print("     erzeugt 'Maximum ausserhalb der Lunge' und Spielraum von selbst.")
-        print("     Gegenmittel: rsna_make_masks.py --refine hull --dilate-px N")
+        print(f"  -> lung area < {LUNG_AREA_MIN}: the mask is too small. It")
+        print("     produces 'maximum outside the lung' and headroom by itself.")
+        print("     Remedy: rsna_make_masks.py --refine hull --dilate-px N")
     if mask_ok:
-        print("  -> beide Kontrollen bestanden.")
+        print("  -> both controls passed.")
 
     print("\n" + "=" * 76)
-    print("BEFUND -- jede Quote neben ihrer Baseline")
+    print("FINDING: every rate beside its baseline")
     print("=" * 76)
     for k, kn, label in [
-        ("peak_in_box", "box_area", "Maximum in einer Box"),
-        ("peak_in_lung", "lung_area", "Maximum in der Lunge"),
-        ("hit_in_lung", "hit_in_lung_null", "  davon: Treffer, Max in der Lunge"),
-        ("mass_in_box", "box_area", "Heatmap-Masse in den Boxen"),
-        ("mass_in_lung", "lung_area", "Heatmap-Masse in der Lunge"),
+        ("peak_in_box", "box_area", "Maximum inside a box"),
+        ("peak_in_lung", "lung_area", "Maximum inside the lung"),
+        ("hit_in_lung", "hit_in_lung_null", "  of those: hits, max inside the lung"),
+        ("mass_in_box", "box_area", "Heat-map mass inside the boxes"),
+        ("mass_in_lung", "lung_area", "Heat-map mass inside the lung"),
     ]:
         m, s = cv_mean(per_fold, k)
         n, _ = cv_mean(per_fold, kn)
-        print(f"  {label:<40} {m:.3f} +- {s:.3f}   Zufall {n:.3f}   "
-              f"Vorsprung {m - n:+.3f}")
+        print(f"  {label:<40} {m:.3f} +- {s:.3f}   chance {n:.3f}   "
+              f"lift {m - n:+.3f}")
 
     print("\n" + "-" * 76)
-    print("DIE ENTSCHEIDENDE FRAGE: schaut das Modell bei Fehlschlaegen AUS der Lunge?")
+    print("THE DECIDING QUESTION: on failures, does the model look OUT of the lung?")
     print("-" * 76)
     mo, mo_s = cv_mean(per_fold, "miss_outside_lung")
     mn, _ = cv_mean(per_fold, "miss_outside_null")
     ml, ml_s = cv_mean(per_fold, "miss_outside_lift")
     t_miss = paired_t(per_fold, "miss_outside_lift")
-    print(f"  Fehlschlag, Maximum ausserhalb der Lunge   {mo:.3f} +- {mo_s:.3f}")
-    print(f"  Zufall dafuer (1 - Lungenflaeche)          {mn:.3f}")
-    print(f"  VORSPRUNG                                  {ml:+.3f} +- {ml_s:.3f}"
-          f"   (gepaartes t = {t_miss:+.2f}, |t|>2,78 = p<0,05)")
+    print(f"  Failure, maximum outside the lung          {mo:.3f} +- {mo_s:.3f}")
+    print(f"  Chance value for that (1 - lung area)      {mn:.3f}")
+    print(f"  LIFT                                       {ml:+.3f} +- {ml_s:.3f}"
+          f"   (paired t = {t_miss:+.2f}, |t|>2.78 = p<0.05)")
 
     print("\n" + "-" * 76)
-    print("SPIELRAUM: was braechte allein das Wegnehmen des Sichtfelds?")
+    print("HEADROOM: what would taking away the field of view alone deliver?")
     print("-" * 76)
     hm, hm_s = cv_mean(per_fold, "peak_in_box_lungrestricted")
     bm, _ = cv_mean(per_fold, "peak_in_box")
     cm, cm_s = cv_mean(per_fold, "crop_headroom")
     nm, _ = cv_mean(per_fold, "headroom_null")
     vm, vm_s = cv_mean(per_fold, "headroom_vs_null")
-    print(f"  Treffer, Maximum nur in der Lunge gesucht   {hm:.3f} +- {hm_s:.3f}")
-    print(f"  gegenueber jetzt                            {bm:.3f}")
-    print(f"  beobachteter Zugewinn                       {cm:+.3f} +- {cm_s:.3f}"
+    print(f"  Hits, maximum searched inside the lung only    {hm:.3f} +- {hm_s:.3f}")
+    print(f"  compared with the current value                {bm:.3f}")
+    print(f"  observed gain                                  {cm:+.3f} +- {cm_s:.3f}"
           f"   (t = {paired_t(per_fold, 'crop_headroom'):+.2f})")
-    print(f"  Zugewinn einer ZUFALLS-Heatmap              {nm:+.3f}"
-          "   <- reine Flaechenrechnung")
+    print(f"  gain of a RANDOM heat map                      {nm:+.3f}"
+          "   <- plain area arithmetic")
 
-    # Zugewinne zu vergleichen laedt den Einwand "Deckeneffekt" ein: das Modell
-    # startet hoeher, hat also weniger Luft. Zwei Vorspruenge gegen die je
-    # eigene Baseline haben dieses Problem nicht.
+    # Comparing gains invites the objection "ceiling effect": the model starts
+    # higher and therefore has less room above it. Two lifts, each against its
+    # own baseline, do not have that problem.
     lf, lf_s = cv_mean(per_fold, "lift_free")
     lr, lr_s = cv_mean(per_fold, "lift_restricted")
-    print("\n  Deckeneffekt-fest formuliert -- zwei Vorspruenge, je gegen die"
-          " eigene Null:")
-    print(f"    frei         {bm:.3f} - {cv_mean(per_fold, 'null_free')[0]:.3f}"
+    print("\n  Stated free of ceiling effects, two lifts, each against its"
+          " own null:")
+    print(f"    free        {bm:.3f} - {cv_mean(per_fold, 'null_free')[0]:.3f}"
           f" = {lf:+.3f} +- {lf_s:.3f}")
-    print(f"    beschraenkt  {hm:.3f} - "
+    print(f"    restricted  {hm:.3f} - "
           f"{cv_mean(per_fold, 'null_restricted')[0]:.3f} = {lr:+.3f} +- {lr_s:.3f}")
-    print(f"    DIFFERENZ    {vm:+.3f} +- {vm_s:.3f}   "
+    print(f"    DIFFERENCE  {vm:+.3f} +- {vm_s:.3f}   "
           f"(t = {paired_t(per_fold, 'lift_delta'):+.2f})")
-    print("  Negativ heisst: die Beschraenkung auf die Lunge macht das Maximum")
-    print("  WENIGER informativ, nicht mehr. (Obergrenze -- ein auf Zuschnitten")
-    print("  trainiertes Modell lernt andere Gewichte.)")
+    print("  Negative means: restricting to the lung makes the maximum LESS")
+    print("  informative, not more. (Upper bound. A model trained on crops")
+    print("  learns different weights.)")
 
     print("\n" + "=" * 76)
     print("LESART")
     print("=" * 76)
     if not mask_ok:
-        # Reihenfolge zaehlt: eine zu kleine oder verschobene Maske erzeugt den
-        # Aussen-Befund von selbst. Die Lesart waere zirkulaer -- also keine.
-        print("  KEINE LESART, solange die Maskenkontrollen nicht bestanden sind.")
-        print("  Der Aussen-Anteil und der Spielraum sind dann Artefakte der")
-        print("  Segmentierung, kein Befund ueber das Modell. Erst die Maske")
-        print("  reparieren (rsna_mask_sweep.py vergleicht Varianten in Sekunden),")
-        print("  dann wieder hier her.")
+        # Order matters: a mask that is too small or displaced produces the
+        # outside finding by itself. The interpretation would be circular.
+        print("  NO INTERPRETATION as long as the mask controls are not passed.")
+        print("  The outside share and the headroom are then artefacts of the")
+        print("  segmentation, not a finding about the model. Repair the mask")
+        print("  first (rsna_mask_sweep.py compares variants in seconds), then")
+        print("  come back here.")
     elif np.isnan(ml):
-        print("  Keine Fehlschlaege in der Stichprobe -- nichts zu entscheiden.")
+        print("  No failures in the sample, so there is nothing to decide.")
     elif abs(t_miss) < 2.78:
-        print(f"  Der Aussen-Anteil ({mo:.3f}) ist von seinem Zufallswert ({mn:.3f})")
-        print(f"  nicht zu unterscheiden (Vorsprung {ml:+.3f}, t = {t_miss:+.2f}).")
-        print("  Das Modell schaut bei Fehlschlaegen nicht systematisch aus der")
-        print("  Lunge heraus -- sein Maximum ist dann schlicht uninformativ.")
-        print("  -> Der Mechanismus, auf dem die Crop-Hoffnung beruht, ist nicht da.")
-        print("  -> Schritt 3 nicht auf dieser Grundlage starten.")
+        print(f"  The outside share ({mo:.3f}) is indistinguishable from its"
+              f" chance value ({mn:.3f})")
+        print(f"  and the lift is {ml:+.3f} (paired t = {t_miss:+.2f}).")
+        print("  On failures the model does not look out of the lung in any")
+        print("  systematic way. Its maximum is then simply uninformative.")
+        print("  -> The mechanism the crop hope rests on is not there.")
+        print("  -> Do not start step 3 on this basis.")
     elif ml > 0 and vm > 0.02:
-        print("  Der Aussen-Anteil liegt ueber seinem Zufallswert UND der Spielraum")
-        print("  uebertrifft den rein geometrischen Zugewinn. Beides zusammen ist")
-        print("  der Mechanismus, den ein Crop adressiert.")
-        print("  -> Schritt 3 (crop, 5 Folds GEPAART je Fold) ist gerechtfertigt.")
+        print("  The outside share exceeds its chance value AND the headroom")
+        print("  exceeds the purely geometric gain. Together they are the")
+        print("  mechanism a crop addresses: attention outside the lung.")
+        print("  -> Step 3 (crop, 5 folds PAIRED per fold) is justified.")
     else:
-        print("  Gemischt: der Aussen-Anteil weicht vom Zufall ab, der Spielraum")
-        print("  bleibt aber im Rahmen der reinen Flaechenrechnung. Wenn ueberhaupt,")
-        print("  dann gepaart je Fold messen -- ein Mittelwertvergleich koennte einen")
-        print("  Effekt dieser Groesse nicht von der Fold-Streuung trennen.")
+        print("  Mixed: the outside share deviates from chance, but the headroom")
+        print("  stays within plain area arithmetic. If measured at all, then")
+        print("  paired per fold. A comparison of means could not separate an")
+        print("  effect of this size from the spread across folds.")
     print("=" * 76)
 
 
@@ -451,23 +501,23 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--size", type=int, default=224)
     p.add_argument("--n", type=int, default=120,
-                   help="Bilder je Fold (0 = alle aus der CAM-CSV)")
+                   help="images per fold (0 = all from the CAM CSV)")
     p.add_argument("--cache-heat", action="store_true",
-                   help="Heatmaps als float16 cachen -- macht Maskenvarianten gratis")
+                   help="cache heat maps as float16, which makes mask variants free")
     p.add_argument("--out", type=Path,
                    default=Path("predictions_rsna/cam_lung.csv"))
     args = p.parse_args(argv)
 
     if not Path(args.masks).exists():
-        print(f"FEHLER: Maskenordner fehlt: {args.masks}")
-        print("  Zuerst:  python rsna_make_masks.py "
+        print(f"ERROR: mask directory missing: {args.masks}")
+        print("  First:   python rsna_make_masks.py "
               "--ids-from \"predictions_rsna/cam_f*_s0.csv\" "
               "--raw-cache data/rsna/unet_raw256.npz")
         return 2
 
     frames, per_fold = [], []
     for f in args.folds:
-        print(f"\nFold {f} (CPU, ein paar Sekunden je Bild)...")
+        print(f"\nFold {f} (CPU, a few seconds per image)...")
         df = run_fold(f, args)
         if df.empty:
             continue
@@ -475,9 +525,9 @@ def main(argv=None) -> int:
         s = summarise(df)
         s["fold"] = f
         per_fold.append(s)
-        print(f"  in Box {s['peak_in_box']:.3f} | in Lunge {s['peak_in_lung']:.3f} "
-              f"(Zufall {s['lung_area']:.3f}) | Fehlschlag aussen "
-              f"{s['miss_outside_lung']:.3f} (Zufall {s['miss_outside_null']:.3f})")
+        print(f"  in box {s['peak_in_box']:.3f} | in lung {s['peak_in_lung']:.3f} "
+              f"(chance {s['lung_area']:.3f}) | failure outside "
+              f"{s['miss_outside_lung']:.3f} (chance {s['miss_outside_null']:.3f})")
 
     if frames:
         all_df = pd.concat(frames, ignore_index=True)
@@ -485,7 +535,7 @@ def main(argv=None) -> int:
         all_df.to_csv(args.out, index=False)
         pd.DataFrame(per_fold).to_csv(
             args.out.with_name(args.out.stem + "_byfold.csv"), index=False)
-        print(f"\nRohdaten: {args.out}")
+        print(f"\nRaw data: {args.out}")
 
     report(per_fold)
     return 0

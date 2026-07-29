@@ -1,34 +1,51 @@
 """
-Sanity-Lauf auf RSNA: EIN Fold, EIN Modell, alle Kontrollen.
+Sanity run on RSNA: one fold, one model, all controls.
 
-Zweck ist ausdruecklich nicht der beste Wert, sondern eine belastbare erste
-Zahl und die Antwort auf vier Fragen:
+A fold is one patient-grouped division of the data into a training part and a
+reporting part, and this script runs exactly one of them. It writes a metrics
+row to results_rsna.csv, the per-image predictions for the reporting split and
+for the inner selection split, a per-epoch history CSV, the Grad-CAM table and
+the weights of the selected epoch.
 
-  1. Schlaegt das Modell die Nur-Header-Baseline von **0,729**? Alles darunter
-     heisst: es hat weniger gelernt als ein Klassifikator, der kein Bild sieht.
-  2. Schlaegt es sie **innerhalb einer Projektion**? Dort liegt die Baseline bei
-     0,553 (AP) / 0,559 (PA). Das ist die eigentliche Frage -- die Gesamt-AUC
-     enthaelt den AP/PA-Effekt, die geschichtete nicht.
-  3. **Zeigt Grad-CAM auf die Pathologie?** RSNA hat Bounding Boxes, damit ist
-     das erstmals messbar statt Ansichtssache. Das war die Ausgangsfrage des
-     ganzen Projekts.
-  4. **Liest das Modell die eingebrannten Marker?** Auf AP-Bildern steht
-     sichtbar "PORTABLE". Die Ecken-Ablation beantwortet das.
+The aim is not the best value but a defensible first one, plus an answer to
+four questions:
 
-Uebernommen aus Phase 3, weil dort teuer gelernt:
-  * Checkpoint UND Schwelle kommen von einem inneren, patientengruppierten
-    Selektions-Split. Das aeussere Val wird nur berichtet, nie optimiert.
-  * `auc_last` und `*_oracle` laufen als optimistische Referenz mit, damit die
-    Luecke sichtbar bleibt.
-  * Alle Vorhersagen landen als CSV auf der Platte. Auf Kermany kostete jede
-    Nachfrage sonst einen kompletten Retraining-Lauf.
+  1. Does the model beat the header-only baseline of 0.729? AUC is the
+     probability that a random pneumonia case is ranked above a random
+     non-case, the same quantity as a c-statistic, and 0.729 is what a
+     classifier reaches that never sees an image. Anything below means the
+     model learned less than the header alone carries.
+  2. Does it beat that baseline within one projection? There it sits at 0.553
+     (AP) and 0.559 (PA). This is the actual question. The overall AUC still
+     contains the AP/PA effect, the stratified one does not.
+  3. Does Grad-CAM point at the pathology? Grad-CAM turns the evidence the
+     network used into a heatmap over the film. RSNA ships bounding boxes, so
+     this is measurable instead of a matter of opinion. It was the starting
+     question of the whole project.
+  4. Does the model read the burnt-in markers? "PORTABLE" is printed on the AP
+     films. The corner ablation, which blanks the four corners and repeats the
+     evaluation, answers that.
 
-Neu gegenueber Phase 3:
-  * Kein Caliper-Matching. Der Confounder ist hier binaer und exakt bekannt,
-    also wird geschichtet -- das kostet kein einziges Bild, waehrend das
-    Matching auf Kermany zwei Drittel der Daten verwarf.
-  * Kein `RandomResolution`. Der Jitter war gegen den Kermany-Zoom-Confounder
-    gebaut; hier sind alle Bilder gleich gross, er wuerde nur Rauschen addieren.
+How to read the output: auc goes against 0.729, auc_stratified against roughly
+0.556, and cam_hit against cam_area_baseline, the fraction of image area the
+boxes cover. A stratified AUC down at its baseline, or a hit rate no better
+than the box area, means the image contributed nothing. A large drop under the
+corner ablation means the marker was doing the work.
+
+Carried over from phase 3, where it was learned the expensive way:
+  * Checkpoint and threshold both come from an inner, patient-grouped
+    selection split. The outer val is only reported, never optimised.
+  * `auc_last` and `*_oracle` run along as an optimistic reference so the gap
+    stays visible.
+  * Every prediction goes to disk as CSV. On Kermany each follow-up question
+    otherwise cost a full retraining run.
+
+New against phase 3:
+  * No caliper matching. The confounder here is binary and exactly known, so
+    the metrics are stratified instead. That costs not a single image, while
+    the matching on Kermany discarded two thirds of the data.
+  * No `RandomResolution`. That jitter was built against the Kermany zoom
+    confounder. Here all images are the same size and it would only add noise.
 
 CLI:
   python rsna_train.py --fold 0 --epochs 8 --batch 16 --workers 0
@@ -54,15 +71,15 @@ from torchvision import transforms as T
 from torchvision.models import ResNet18_Weights, resnet18
 
 IMNET_MEAN, IMNET_STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-BOX_SPACE = 1024          # Bounding Boxes liegen im Original-DICOM-Raster
+BOX_SPACE = 1024          # boxes are given in the original DICOM grid
 
 
 # --------------------------------------------------------------------------
-# Daten
+# Data
 # --------------------------------------------------------------------------
 
 class RsnaDataset(Dataset):
-    """IDs statt Pfade -- den Pfad baut erst der Loader. Siehe rsna_splits.py."""
+    """IDs instead of paths. The loader builds the path. See rsna_splits.py."""
 
     def __init__(self, root: Path, ids: list[str], labels: dict[str, int], tf):
         self.root, self.ids, self.labels, self.tf = root, ids, labels, tf
@@ -77,17 +94,17 @@ class RsnaDataset(Dataset):
 
 
 class MaskCorners:
-    """Setzt die vier Bildecken auf den Median -- Ablation gegen Marker-Lesen.
+    """Sets the four image corners to the median. Ablation against marker reading.
 
-    Auf den AP-Aufnahmen stehen "PORTABLE", Seitenmarker und Pfeile im Bild.
-    Das ist ein direkter visueller Proxy fuer die Aufnahmeart, und die
-    Aufnahmeart ist der gesamte Confounder. Ein grober Statistiktest (Anteil
-    heller Pixel in den Ecken) findet nichts, aber ein Faltungsnetz liest
-    Schrift besser als eine Helligkeitsschwelle -- also wird es ausprobiert
-    statt bewertet.
+    The AP films carry "PORTABLE", side markers and arrows inside the image.
+    That is a direct visual proxy for the acquisition type, and the acquisition
+    type is the whole confounder. A crude statistical test (share of bright
+    pixels in the corners) finds nothing, but a convolutional network reads
+    text better than a brightness threshold, so this gets tried rather than
+    argued about.
 
-    Bewusst der Median und nicht Schwarz: eine schwarze Flaeche ist selbst ein
-    auffaelliges Merkmal und wuerde eine neue Kante einfuehren.
+    The median and not black, on purpose: a black patch is a conspicuous
+    feature in itself and would introduce a new edge.
     """
 
     def __init__(self, frac: float = 0.18):
@@ -102,8 +119,8 @@ class MaskCorners:
 
 
 def build_transforms(size: int, train: bool):
-    # KEIN horizontales Spiegeln: erzeugt Situs inversus, vertauscht die
-    # Herzsilhouette und widerspricht dem Seitenmarker im Bild.
+    # NO horizontal flipping: it creates situs inversus, mirrors the cardiac
+    # silhouette and contradicts the side marker printed in the image.
     base = [T.Grayscale(num_output_channels=3), T.ToTensor(),
             T.Normalize(IMNET_MEAN, IMNET_STD)]
     if not train:
@@ -139,7 +156,7 @@ def perturbed_transform(size: int, name: str):
 # --------------------------------------------------------------------------
 
 def pick_device(name: str):
-    """DirectML ist auf dieser Hardware der einzige GPU-Weg (RX 5500 XT, RDNA1)."""
+    """DirectML is the only GPU path on this hardware (RX 5500 XT, RDNA1)."""
     if name in ("auto", "cuda") and torch.cuda.is_available():
         return torch.device("cuda"), True
     if name in ("auto", "directml"):
@@ -149,9 +166,9 @@ def pick_device(name: str):
                 return torch_directml.device(), False
         except ImportError:
             if name == "directml":
-                raise SystemExit("torch-directml fehlt:  pip install torch-directml")
+                raise SystemExit("torch-directml is missing:  pip install torch-directml")
     if name == "directml":
-        raise SystemExit("torch-directml findet kein Geraet.")
+        raise SystemExit("torch-directml finds no device.")
     return torch.device("cpu"), False
 
 
@@ -172,6 +189,23 @@ def predict(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
     return np.concatenate(p), np.concatenate(y)
 
 
+def bce_from_probs(y: np.ndarray, p: np.ndarray, pos_weight: float = 1.0) -> float:
+    """The same loss as in training, but computed from probabilities.
+
+    `predict` returns probabilities, not logits. Instead of changing the
+    signature (and with it every caller), the loss is recomputed here, with the
+    same `pos_weight` as `BCEWithLogitsLoss`. Otherwise the training curve and
+    the selection curve are not comparable and the learning curve shows a gap
+    between the two that does not exist.
+
+    Clipping at 1e-7 catches p = 0 and p = 1. Without it a single saturated
+    prediction returns inf and the whole curve is empty.
+    """
+    p = np.clip(np.asarray(p, dtype=np.float64), 1e-7, 1 - 1e-7)
+    y = np.asarray(y, dtype=np.float64)
+    return float(np.mean(-(pos_weight * y * np.log(p) + (1 - y) * np.log(1 - p))))
+
+
 def youden_threshold(y: np.ndarray, p: np.ndarray) -> float:
     order = np.argsort(-p)
     ys, ps = y[order], p[order]
@@ -181,11 +215,11 @@ def youden_threshold(y: np.ndarray, p: np.ndarray) -> float:
 
 
 def scores(y: np.ndarray, p: np.ndarray, thr: float | None = None) -> dict:
-    """Rangmetriken plus Sens/Spez an einer VORGEGEBENEN Schwelle.
+    """Ranking metrics plus sensitivity and specificity at a GIVEN threshold.
 
-    `*_oracle` sucht die Schwelle auf demselben Satz, auf dem berichtet wird --
-    absichtlich mitgeschrieben als optimistisches Gegenstueck, damit die Luecke
-    zur ehrlichen Zahl sichtbar bleibt.
+    `*_oracle` picks the threshold on the same set that is reported on. It is
+    written out on purpose as the optimistic counterpart, so that the gap to
+    the honest number stays visible.
     """
     out = {"auc": float(roc_auc_score(y, p)),
            "auprc": float(average_precision_score(y, p))}
@@ -202,20 +236,19 @@ def scores(y: np.ndarray, p: np.ndarray, thr: float | None = None) -> dict:
 def stratified_scores(y: np.ndarray, p: np.ndarray, vp: np.ndarray,
                       thr: float, thr_by_view: dict[str, float] | None = None
                       ) -> dict:
-    """AUC je Projektion, plus Sens/Spez an globaler UND schichteigener Schwelle.
+    """AUC per projection, plus sens/spec at the global and the per-stratum threshold.
 
-    Die Gesamt-AUC enthaelt den AP/PA-Effekt (Header-Baseline 0,729). Innerhalb
-    einer Projektion faellt der weg, dort liegt die Baseline bei ~0,556. Nur
-    diese geschichtete Zahl sagt etwas ueber Radiologie aus.
+    The overall AUC contains the AP/PA effect (header baseline 0.729). Within
+    one projection that effect drops out and the baseline is about 0.556. Only
+    this stratified number says anything about radiology.
 
-    Warum zusaetzlich zwei Schwellen: der erste Lauf hatte bei praktisch
-    identischer AUC (0,818 AP gegen 0,824 PA) an EINER Schwelle Sens 0,839 in
-    AP und 0,498 in PA. Dieselbe Zahl verhaelt sich in den beiden Projektionen
-    wie zwei verschiedene Tests -- in PA-Aufnahmen waere die Haelfte der
-    Pneumonien uebersehen worden. Das ist kein Modellfehler, sondern der
-    Praevalenzunterschied (0,383 gegen 0,093), der ueber eine feste Schwelle in
-    Sensitivitaet umschlaegt. Beides wird berichtet, damit der Effekt sichtbar
-    bleibt statt weggerechnet zu werden.
+    Why two thresholds on top of that: in the first run the AUC was practically
+    identical (0.818 AP against 0.824 PA), yet at ONE threshold sensitivity was
+    0.839 in AP and 0.498 in PA. The same number behaves like two different
+    tests in the two projections. In PA films half the pneumonias would have
+    been missed. That is not a model error but the prevalence difference (0.383
+    against 0.093) turning into sensitivity through a fixed threshold. Both are
+    reported so the effect stays visible instead of being averaged away.
     """
     out = {}
     for v in ("AP", "PA"):
@@ -235,13 +268,13 @@ def stratified_scores(y: np.ndarray, p: np.ndarray, vp: np.ndarray,
             out[f"spec_{v}_strat"] = float(((p[m] < t) & neg).sum() / max(neg.sum(), 1))
 
     if "auc_AP" in out and "auc_PA" in out:
-        # gewichtetes Mittel der Schichten: die AUC, die uebrig bliebe, wenn
-        # AP und PA gleich haeufig waeren -- der confounderbereinigte Wert
+        # weighted mean of the strata: the AUC that would remain if AP and PA
+        # were equally frequent, the confounder-free value
         w = np.array([out["n_AP"], out["n_PA"]], float)
         out["auc_stratified"] = float(
             (out["auc_AP"] * w[0] + out["auc_PA"] * w[1]) / w.sum())
-        # Das direkte Mass fuer das Problem: wie weit klaffen die
-        # Sensitivitaeten zwischen den Projektionen auseinander?
+        # The direct measure of the problem: how far apart do the
+        # sensitivities of the two projections sit?
         out["sens_gap"] = float(abs(out["sens_AP"] - out["sens_PA"]))
         if "sens_AP_strat" in out and "sens_PA_strat" in out:
             out["sens_gap_strat"] = float(
@@ -251,27 +284,27 @@ def stratified_scores(y: np.ndarray, p: np.ndarray, vp: np.ndarray,
 
 def inner_split(ids: list[str], labels, vp: dict[str, str], seed: int,
                 n_splits: int) -> tuple[list[str], list[str]]:
-    """Teilt fold["train"] in Fit- und Selektionsteil, geschichtet wie aussen.
+    """Splits fold["train"] into a fit part and a selection part, stratified as outside.
 
-    Warum ueberhaupt: vorher wurde das Checkpoint per AUC auf dem AEUSSEREN Val
-    gewaehlt und dieselbe AUC berichtet -- jede Zahl war damit ein Maximum ueber
-    alle Epochen auf den Berichtsdaten. Auf Kermany versteckte die Decke das;
-    bei AUC ~0,85 verschiebt es die Zahl um die Groessenordnung der Effekte,
-    die man messen will.
+    Picking the checkpoint by AUC on the OUTER val and then reporting that same
+    AUC makes every number a maximum over all epochs on the reporting data. On
+    Kermany the ceiling hid that. At an AUC of about 0.85 it shifts the number
+    by the order of magnitude of the effects one wants to measure.
 
-    Geschichtet wird auch hier nach label x ViewPosition, sonst weicht die
-    AP/PA-Quote des Selektions-Splits vom Val ab und die Schwelle passt nicht.
+    Stratification here is again by label x ViewPosition, otherwise the AP/PA
+    ratio of the selection split drifts away from val and the threshold no
+    longer fits.
     """
     strat = np.array([f"{labels[i]}|{vp[i]}" for i in ids])
-    g = np.array(ids)                      # ein Bild je Patient
+    g = np.array(ids)                      # one image per patient
     sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     fit_i, sel_i = next(iter(sgkf.split(np.zeros(len(ids)), strat, g)))
-    assert not (set(g[fit_i]) & set(g[sel_i])), "Gruppen-Leak im inneren Split!"
+    assert not (set(g[fit_i]) & set(g[sel_i])), "group leak in the inner split!"
     return [ids[i] for i in fit_i], [ids[i] for i in sel_i]
 
 
 # --------------------------------------------------------------------------
-# Grad-CAM gegen Bounding Boxes
+# Grad-CAM against the bounding boxes
 # --------------------------------------------------------------------------
 
 def load_boxes(csv_dir: Path) -> dict[str, list[tuple[float, float, float, float]]]:
@@ -285,23 +318,23 @@ def load_boxes(csv_dir: Path) -> dict[str, list[tuple[float, float, float, float
 
 def cam_vs_boxes(model, root: Path, ids: list[str], boxes: dict, size: int,
                  n: int, seed: int) -> tuple[dict, pd.DataFrame]:
-    """Misst, ob die Heatmap auf das Infiltrat zeigt.
+    """Measures whether the heatmap points at the infiltrate.
 
-    Zwei Masse, beide gegen eine Zufallsbaseline:
+    Two measures, both against a chance baseline:
 
-      hit    Liegt das Maximum der Heatmap in einer Box? ("pointing game")
-             Zufallsbaseline = Flaechenanteil der Boxen.
-      mass   Welcher Anteil der Heatmap-Masse liegt in den Boxen?
-             Zufallsbaseline ebenfalls der Flaechenanteil.
+      hit    Does the maximum of the heatmap fall inside a box? ("pointing game")
+             Chance baseline = area fraction of the boxes.
+      mass   Which share of the heatmap mass lies inside the boxes?
+             Chance baseline is again the area fraction.
 
-    Der Flaechenanteil MUSS mitberichtet werden. Die Boxen decken einen
-    erheblichen Teil des Bildes ab; eine Trefferquote von 0,6 klingt gut und
-    waere bei 0,55 Flaechenanteil nahezu nichts. Ohne diese Baseline ist die
-    Zahl wertlos -- genau der Fehler, den Grad-CAM-Abbildungen in Praesentationen
-    ueblicherweise machen.
+    The area fraction MUST be reported with them. The boxes cover a substantial
+    part of the image; a hit rate of 0.6 sounds good and would be next to
+    nothing at an area fraction of 0.55. Without that baseline the number is
+    worthless, which is the mistake Grad-CAM figures in presentations usually
+    make.
 
-    Laeuft auf der CPU: Grad-CAM braucht Rueckwaertspfad durch Hooks, und das
-    ist unter DirectML weder schnell noch zuverlaessig.
+    Runs on the CPU: Grad-CAM needs a backward pass through hooks, and that is
+    neither fast nor reliable under DirectML.
     """
     from pytorch_grad_cam import GradCAM
     from pytorch_grad_cam.utils.model_targets import BinaryClassifierOutputTarget
@@ -368,13 +401,16 @@ def main() -> None:
     p.add_argument("--size", type=int, default=224)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--workers", type=int, default=0,
-                   help="unter Windows 0 lassen: spawn importiert Torch pro Worker neu")
+                   help="leave at 0 on Windows: spawn reimports torch in every worker")
     p.add_argument("--inner-splits", type=int, default=6)
     p.add_argument("--device", default="auto",
                    choices=["auto", "cuda", "directml", "cpu"])
-    p.add_argument("--cam-n", type=int, default=300, help="0 = Grad-CAM ueberspringen")
+    p.add_argument("--cam-n", type=int, default=300, help="0 = skip Grad-CAM")
     p.add_argument("--out", type=Path, default=Path("results_rsna.csv"))
     p.add_argument("--pred-dir", type=Path, default=Path("predictions_rsna"))
+    p.add_argument("--history", type=Path, default=None,
+                   help="per-epoch history (default: "
+                        "<pred-dir>/history_f{fold}_s{seed}.csv)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed); np.random.seed(args.seed); random.seed(args.seed)
@@ -393,10 +429,10 @@ def main() -> None:
     print(f"\nFold {args.fold}, Seed {args.seed}, Device {device}")
     print(f"  fit {len(fit_ids)} (pos {y_fit.mean():.3f}) | sel {len(sel_ids)} "
           f"| val {len(val_ids)}")
-    print(f"  Zielmarken: Gesamt-AUC > 0.729 (Header-Baseline), "
-          f"je Projektion > ~0.556")
+    print(f"  Targets: overall AUC > 0.729 (header baseline), "
+          f"per projection > ~0.556")
     if device.type == "cpu":
-        print("  WARNUNG: CPU. Auf AMD unter Windows:  pip install torch-directml")
+        print("  WARNING: CPU. On AMD under Windows:  pip install torch-directml")
 
     tr = DataLoader(RsnaDataset(args.images, fit_ids, labels,
                                build_transforms(args.size, True)),
@@ -410,8 +446,8 @@ def main() -> None:
                     batch_size=args.batch * 2, num_workers=args.workers)
 
     model = make_model(device)
-    # Positivrate 0.225 -- das Ungleichgewicht kippt gegenueber Kermany (0.74)
-    # in die andere Richtung, pos_weight also > 1 statt < 1.
+    # Positive rate 0.225. The imbalance tips the other way than on Kermany
+    # (0.74), so pos_weight is > 1 instead of < 1.
     pos_weight = torch.tensor([(y_fit == 0).sum() / max((y_fit == 1).sum(), 1)],
                               dtype=torch.float32, device=device)
     print(f"  pos_weight {pos_weight.item():.2f}")
@@ -420,34 +456,80 @@ def main() -> None:
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=args.lr, total_steps=args.epochs * max(len(tr), 1))
 
+    # Per-epoch history. A single result row at the end leaves no learning
+    # curve to show, and a run that dies in hour four leaves nothing at all.
+    #
+    # What is logged is the SELECTION split (sel), not the reporting set (val).
+    # That is the point rather than a saving in the wrong place: sel is exempt
+    # from fitting, so the gap between training loss and sel loss shows the
+    # overfitting in full. A curve on val would also be an invitation to pick
+    # the epoch afterwards, the circular reasoning this project avoids
+    # everywhere else.
+    hist_path = (args.history if args.history is not None else
+                 args.pred_dir / f"history_f{args.fold}_s{args.seed}.csv")
+    hist_path.parent.mkdir(parents=True, exist_ok=True)
+    history: list[dict] = []
+
+    def write_history() -> None:
+        """Written after EVERY epoch, not at the end. An aborted 24-hour run
+        should still leave its curve behind."""
+        pd.DataFrame(history).to_csv(hist_path, index=False)
+
     best_sel, best_state, best_ep = -1.0, None, -1
     for ep in range(args.epochs):
         t0 = time.time()
         model.train()
+        # Read the LR BEFORE the epoch. OneCycleLR advances after every step,
+        # so after the loop it would hold the rate of the next epoch and the
+        # curve would be shifted by one epoch.
+        lr_now = float(sched.get_last_lr()[0])
+        # Accumulate on the device and fetch it ONCE per epoch. `float(loss)`
+        # inside the loop would wait on the device at every batch, roughly 480
+        # synchronisation points per epoch just to record one number for the
+        # curve. `drop_last=True` makes all batches the same size, so the mean
+        # of the means is the right one.
+        loss_sum = torch.zeros((), device=device)
+        n_batch = 0
         for x, t in tr:
             x, t = x.to(device, non_blocking=True), t.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
-            crit(model(x).squeeze(1), t).backward()
+            loss = crit(model(x).squeeze(1), t)
+            loss.backward()
             opt.step(); sched.step()
+            loss_sum += loss.detach(); n_batch += 1
+        train_loss = float(loss_sum.cpu()) / max(n_batch, 1)
         ps, ys = predict(model, sel, device)
         a = roc_auc_score(ys, ps)
-        if a > best_sel:
+        improved = a > best_sel
+        if improved:
             best_sel, best_ep = a, ep
             best_state = {k: v.detach().cpu().clone()
                           for k, v in model.state_dict().items()}
         dt = time.time() - t0
+        history.append({
+            "fold": args.fold, "seed": args.seed, "epoch": ep + 1,
+            "train_loss": train_loss,
+            "sel_loss": bce_from_probs(ys, ps, float(pos_weight.item())),
+            "sel_auc": float(a),
+            "lr": lr_now, "sec": dt,
+            "is_best": int(improved),
+        })
+        write_history()
         print(f"  epoch {ep + 1}/{args.epochs}  sel AUC {a:.4f}  "
-              f"[{dt:.0f}s, Rest ~{dt * (args.epochs - ep - 1) / 60:.0f} min]")
+              f"train loss {history[-1]['train_loss']:.4f}  "
+              f"sel loss {history[-1]['sel_loss']:.4f}"
+              f"{'  <-- best so far' if improved else ''}  "
+              f"[{dt:.0f}s, ~{dt * (args.epochs - ep - 1) / 60:.0f} min left]")
 
     p_last, y = predict(model, va, device)
     auc_last = float(roc_auc_score(y, p_last))
 
     model.load_state_dict(best_state)
     p_sel, y_sel = predict(model, sel, device)
-    thr = youden_threshold(y_sel, p_sel)          # Schwelle NICHT vom Berichtsatz
-    # ... und je Projektion ebenfalls auf dem Selektions-Split, nicht auf dem Val.
-    # Eine auf dem Berichtsatz gesuchte Schichtschwelle waere derselbe
-    # Zirkelschluss wie die globale und wuerde den Gewinn ueberzeichnen.
+    thr = youden_threshold(y_sel, p_sel)          # threshold NOT from the reporting set
+    # ... and per projection likewise on the selection split, not on val. A
+    # per-stratum threshold searched on the reporting set would be the same
+    # circular reasoning as the global one and would overstate the gain.
     vp_sel = np.array([vpmap[i] for i in sel_ids])
     thr_by_view = {v: youden_threshold(y_sel[vp_sel == v], p_sel[vp_sel == v])
                    for v in ("AP", "PA")
@@ -463,21 +545,21 @@ def main() -> None:
                 "best_epoch": best_ep + 1, "n_fit": len(fit_ids),
                 "n_sel": len(sel_ids), "n_val": len(val_ids)})
 
-    print(f"\n  AUC gesamt      {res['auc']:.4f}   (letzte Epoche {auc_last:.4f}, "
-          f"Header-Baseline 0.729)")
+    print(f"\n  AUC overall     {res['auc']:.4f}   (last epoch {auc_last:.4f}, "
+          f"header baseline 0.729)")
     for v in ("AP", "PA"):
         if f"auc_{v}" in res:
-            print(f"  AUC nur {v}      {res[f'auc_{v}']:.4f}   "
+            print(f"  AUC {v} only     {res[f'auc_{v}']:.4f}   "
                   f"(n={res[f'n_{v}']}, pos={res[f'pos_{v}']:.3f}, "
-                  f"Baseline ~0.556)")
+                  f"baseline ~0.556)")
     if "auc_stratified" in res:
-        print(f"  AUC geschichtet {res['auc_stratified']:.4f}  <-- die ehrliche Zahl")
-    print(f"  Sens {res['sens']:.3f} / Spez {res['spec']:.3f} "
-          f"(Oracle {res['sens_oracle']:.3f}/{res['spec_oracle']:.3f})")
+        print(f"  AUC stratified  {res['auc_stratified']:.4f}  <-- the honest number")
+    print(f"  Sens {res['sens']:.3f} / Spec {res['spec']:.3f} "
+          f"(oracle {res['sens_oracle']:.3f}/{res['spec_oracle']:.3f})")
 
-    # Der Kern: verhaelt sich EINE Schwelle in beiden Projektionen gleich?
+    # The core question: does ONE threshold behave the same in both projections?
     if "sens_gap" in res:
-        print(f"\n  Schwelle            {'global':>22}   {'je Projektion':>22}")
+        print(f"\n  Threshold           {'global':>22}   {'per projection':>22}")
         for v in ("AP", "PA"):
             g = f"Sens {res[f'sens_{v}']:.3f} Spez {res[f'spec_{v}']:.3f}"
             s = (f"Sens {res[f'sens_{v}_strat']:.3f} Spez {res[f'spec_{v}_strat']:.3f}"
@@ -487,10 +569,10 @@ def main() -> None:
         if "sens_gap_strat" in res:
             line += f"   {res['sens_gap_strat']:>22.3f}"
         print(line)
-        print("    Eine feste Schwelle ist bei ungleicher Praevalenz (0.383 vs 0.093)")
-        print("    in den beiden Projektionen faktisch ein anderer Test.")
+        print("    A fixed threshold at unequal prevalence (0.383 vs 0.093) is")
+        print("    effectively a different test in the two projections.")
 
-    # ---- Stoerungen, allen voran die Ecken-Ablation --------------------
+    # ---- Perturbations, above all the corner ablation ------------------
     preds = {"patientId": list(val_ids), "y": y.tolist(), "viewpos": vp.tolist(),
              "p_clean": p_val.tolist(), "p_last_epoch": p_last.tolist()}
     print()
@@ -502,35 +584,35 @@ def main() -> None:
                                            num_workers=args.workers), device)
         res[f"auc_{name}"] = float(roc_auc_score(yy, pp))
         preds[f"p_{name}"] = pp.tolist()
-        tag = "  <-- Marker-Ablation" if name == "corners" else ""
-        print(f"  Stoerung {name:<10} AUC {res[f'auc_{name}']:.4f}  "
+        tag = "  <-- marker ablation" if name == "corners" else ""
+        print(f"  Perturbation {name:<10} AUC {res[f'auc_{name}']:.4f}  "
               f"({res[f'auc_{name}'] - res['auc']:+.4f}){tag}")
 
     # ---- Grad-CAM gegen Bounding Boxes ---------------------------------
     cam_df = pd.DataFrame()
     if args.cam_n:
-        print(f"\n  Grad-CAM auf {args.cam_n} positiven Val-Bildern (CPU)...")
+        print(f"\n  Grad-CAM on {args.cam_n} positive val images (CPU)...")
         boxes = load_boxes(args.csv)
         cam_res, cam_df = cam_vs_boxes(model, args.images, val_ids, boxes,
                                        args.size, args.cam_n, args.seed)
         res.update(cam_res)
         if cam_res:
-            print(f"  Treffer  {cam_res['cam_hit']:.3f}  vs Zufall "
+            print(f"  Hit rate {cam_res['cam_hit']:.3f}  vs chance "
                   f"{cam_res['cam_area_baseline']:.3f}  "
-                  f"(Vorsprung {cam_res['cam_hit_lift']:+.3f})")
-            print(f"  Masse    {cam_res['cam_mass']:.3f}  vs Zufall "
+                  f"(margin {cam_res['cam_hit_lift']:+.3f})")
+            print(f"  Mass     {cam_res['cam_mass']:.3f}  vs chance "
                   f"{cam_res['cam_area_baseline']:.3f}  "
-                  f"(Vorsprung {cam_res['cam_mass_lift']:+.3f})")
-            print("  Ohne die Zufallsbaseline ist die Trefferquote bedeutungslos:")
-            print("  die Boxen decken einen erheblichen Teil des Bildes ab.")
+                  f"(margin {cam_res['cam_mass_lift']:+.3f})")
+            print("  Without the chance baseline the hit rate means nothing:")
+            print("  the boxes cover a substantial part of the image.")
 
-    # ---- Speichern ------------------------------------------------------
+    # ---- Saving ---------------------------------------------------------
     args.pred_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(preds).to_csv(
         args.pred_dir / f"rsna_f{args.fold}_s{args.seed}.csv", index=False)
-    # Auch die Selektions-Vorhersagen: ohne sie laesst sich jede Frage zur
-    # Schwelle spaeter nur als Oracle beantworten (Schwelle auf dem Berichtsatz
-    # gesucht = zu optimistisch). Genau daran fehlte es nach dem ersten Lauf.
+    # The selection predictions are written as well. Without them any later
+    # question about the threshold can only be answered as an oracle (threshold
+    # searched on the reporting set = too optimistic).
     pd.DataFrame({"patientId": sel_ids, "y": y_sel.tolist(),
                   "viewpos": vp_sel.tolist(), "p_sel": p_sel.tolist()}).to_csv(
         args.pred_dir / f"sel_f{args.fold}_s{args.seed}.csv", index=False)
@@ -538,18 +620,18 @@ def main() -> None:
         cam_df.to_csv(args.pred_dir / f"cam_f{args.fold}_s{args.seed}.csv", index=False)
     torch.save(best_state, f"checkpoints/rsna_f{args.fold}_s{args.seed}.pth")
 
-    # NICHT anhaengen, sondern einlesen-zusammenfuehren-neuschreiben.
-    # Ein blosses mode="a" schreibt die Werte in der Reihenfolge des AKTUELLEN
-    # Laufs unter eine Kopfzeile, die aus einem frueheren stammt. Sobald sich
-    # das Metrikset aendert -- hier kamen thr_AP/sens_AP_strat/... hinzu --
-    # stehen 49 Werte unter 41 Spaltennamen. Die Datei ist dann nicht kaputt im
-    # Sinne von unlesbar, sondern schlimmer: still verschoben.
+    # Read, merge and rewrite instead of appending. A plain mode="a" writes
+    # the values in the order of the CURRENT run under a header that came from
+    # an earlier one. As soon as the metric set changes, and thr_AP,
+    # sens_AP_strat and the rest belong to it, 49 values sit under 41 column
+    # names. The file is then not broken in the sense of unreadable, but worse:
+    # silently shifted.
     row = pd.DataFrame([res])
     if args.out.exists():
         old = pd.read_csv(args.out)
         row = pd.concat([old, row], ignore_index=True)
     row.to_csv(args.out, index=False)
-    print(f"\ngespeichert: {args.out}, {args.pred_dir}/, "
+    print(f"\nsaved: {args.out}, {args.pred_dir}/, "
           f"checkpoints/rsna_f{args.fold}_s{args.seed}.pth")
 
 

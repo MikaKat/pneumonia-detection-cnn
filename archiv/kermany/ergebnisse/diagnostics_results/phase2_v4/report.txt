@@ -1,0 +1,97 @@
+################################################################
+# Diagnostik-Lauf: phase2_v4
+# Checkpoint: checkpoints/best_model_v4.pth
+# Eingabe: LUNGEN-MASKIERT (v4)
+# Datum: 2026-07-24 22:59:42
+################################################################
+
+=== Test 0: Klassifikations-Metriken auf dem Test-Set ===
+Quantitative Leistung (Konfusionsmatrix, Sensitivitaet/Spezifitaet, AUC,
+Youden-Schwellenwert) - damit De-Bias-Effekte auch an harten Zahlen sichtbar werden.
+Konfusionsmatrix (Zeilen=wahr, Spalten=Vorhersage):
+[[128 106]
+ [  7 383]]
+Sensitivität (Recall PNEU): 0.9821
+Spezifität:                 0.5470
+AUC:                        0.9218
+
+              precision    recall  f1-score   support
+
+      NORMAL       0.95      0.55      0.69       234
+   PNEUMONIA       0.78      0.98      0.87       390
+
+    accuracy                           0.82       624
+   macro avg       0.87      0.76      0.78       624
+weighted avg       0.85      0.82      0.80       624
+
+Bester Schwellenwert (Youden J): 0.9621
+  -> Sensitivität: 0.7667, Spezifität: 0.9145
+Konfusionsmatrix bei diesem Schwellenwert:
+[[214  20]
+ [ 91 299]]
+
+=== Test 1: CAM-Vergleich (Grad-CAM / Grad-CAM++ / HiResCAM) ===
+Alle Heatmaps erklaeren die PNEUMONIA-Klasse. Grad-CAM==HiResCAM ist bei
+ResNet (GAP->fc) erwartbar und belegt, dass das CAM 'faithful' ist.
+  -> gespeichert: cam_compare.png
+
+=== Test 2: Layer-Vergleich (layer4 7x7 / layer3 14x14 / layer2 28x28) ===
+Grad-CAM auf verschiedenen Bloecken. Tiefer = grober, aber semantischer.
+HiResCAM hier bewusst nicht: seine Faithfulness gilt nur vor dem GAP.
+  -> gespeichert: cam_layers.png
+
+=== Test 3: Occlusion (komplett / nur Zentrum / nur Rand) ===
+Welcher Bildteil traegt die Vorhersage? Kollabiert die Separation bei
+'nur Zentrum' UND 'nur Rand', ist das Signal weder rein zentral noch
+rein am Rand lokalisiert - Hinweis auf globale/grobe Merkmale.
+
+Variante        P(PNEU|NORMAL)    P(PNEU|PNEU)    Separation
+------------------------------------------------------------
+komplett                 0.418           0.970         0.551
+nur Zentrum              0.544           0.949         0.405
+nur Rand                 0.970           0.970         0.000
+------------------------------------------------------------
+
+=== Test 4: Statistik-Test (Einzelmerkmal-Trennkraft) ===
+Wie gut trennt EINE globale Zahl die Klassen? AUC nahe 0/1 = starker
+Datensatz-Confounder. Merkmal ist bei AUC<0.5 in Pneumonie NIEDRIGER.
+NEU: 'lung_area' = Anteil segmentierter Lungen-Pixel. Trennt DIESE Zahl
+die Klassen (AUC weit weg von 0.5), verraet die MASKENFORM die Klasse -
+ein moeglicher neuer Shortcut durch untersegmentierte Verschattungen.
+
+Merkmal            mean NORMAL     mean PNEU     AUC  Trennkraft
+----------------------------------------------------------------
+mean_intensity           0.492         0.462   0.378       0.245
+contrast                 0.235         0.211   0.266       0.467
+black_frac               0.081         0.053   0.327       0.346
+lung_area                0.268         0.217   0.255       0.489
+----------------------------------------------------------------
+  -> gespeichert: bias_stats.png
+
+=== Test 5: Blur-Test (Separation vs. Weichzeichnung) ===
+Starker Blur zerstoert feine Anatomie, laesst Grobstatistik intakt.
+Bleibt die Separation hoch, reicht dem Modell die Grobstruktur.
+Blur wird NACH CLAHE angewandt (sonst schaerft CLAHE ihn wieder auf).
+
+Blur-Radius   P(PNEU|NORMAL)    P(PNEU|PNEU)    Separation
+----------------------------------------------------------
+0                      0.418           0.970         0.551
+2                      0.991           0.997         0.006
+4                      0.998           0.999         0.001
+8                      0.997           0.999         0.002
+16                     0.996           0.995        -0.000
+----------------------------------------------------------
+  -> gespeichert: blur_test.png
+
+=== Test 6: Grad-CAM-Lungenüberlappung ===
+Anteil der Grad-CAM-'Energie', der INNERHALB der Lungenmaske liegt.
+Hoch = das Modell schaut in die Lunge; niedrig = es schaut woanders
+(Rand, Weichteile). Genau das soll die Maskierung verbessern. Vergleich
+v3 (unmaskiert) vs v4 (maskiert): steigt der Anteil deutlich?
+
+Klasse           CAM-Anteil in Lunge
+------------------------------------
+NORMAL                         0.271
+PNEUMONIA                      0.296
+GESAMT                         0.284
+------------------------------------

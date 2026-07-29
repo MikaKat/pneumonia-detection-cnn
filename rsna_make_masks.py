@@ -1,68 +1,76 @@
 """
-Schritt 9a: U-Net-Lungenmasken fuer den RSNA-Datensatz erzeugen.
+Step 9a: produce U-Net lung masks for the RSNA data set.
 
-Warum ein eigenes Skript und nicht `segmentation/make_masks.py`?
-  Jenes ist auf die Kermany-Ordnerstruktur `data/chest_xray/{split}/{klasse}/`
-  festverdrahtet. RSNA liegt flach: `data/rsna/png512/{patientId}.png`, ohne
-  Klassenordner (das Label steht in `stage_2_train_labels.csv`).
+Why a separate script and not `segmentation/make_masks.py`?
+  That one is wired to the Kermany folder layout `data/chest_xray/{split}/{class}/`.
+  RSNA is flat: `data/rsna/png512/{patientId}.png`, without class folders (the
+  label lives in `stage_2_train_labels.csv`).
 
-Die drei Regeln, die hier gelten:
+The three rules that apply here:
 
-  1. EIGENE VORVERARBEITUNG DES SEGMENTERS. Das U-Net hat Graustufen in [0,1]
-     bei 256x256 gelernt -- ohne CLAHE, ohne Per-Bild-Standardisierung, ohne
-     ImageNet-Normalisierung. Es bekommt genau das, NICHT die
-     Klassifikator-Transform aus `rsna_train.build_transforms`.
+  1. THE SEGMENTER GETS ITS OWN PREPROCESSING. The U-Net, a network that decides
+     lung or not lung for every pixel, learned on grayscale 256x256 in [0,1]:
+     no CLAHE, no per-image standardisation, no ImageNet normalisation. It gets
+     exactly that, NOT the classifier transform from
+     `rsna_train.build_transforms`.
 
-  2. DOMAIN-SHIFT. Trainiert auf Montgomery/Shenzhen (Erwachsene,
-     Tuberkulose-Screening), angewandt auf RSNA (Notaufnahme, viele
-     Liegendaufnahmen). Deshalb QC-Vorschau UND Flaechenstatistik.
+  2. DOMAIN SHIFT. Trained on Montgomery/Shenzhen (adults, tuberculosis
+     screening), applied to RSNA (emergency department, many supine films).
+     Hence a QC preview AND an area statistic.
 
-  3. TEILMENGE STATT ALLES. `--ids-from` nimmt die vorhandenen CAM-CSVs
-     (~1500 Bilder statt 26 684).
+  3. A SUBSET INSTEAD OF EVERYTHING. `--ids-from` takes the existing CAM CSVs
+     (~1500 images instead of 26,684).
 
-ROH-CACHE -- der Grund fuer die zweite Fassung dieses Skripts
--------------------------------------------------------------
-Der erste Lauf hat eine Lungenflaeche von 0,210 ergeben. Anatomisch sind in
-einer frontalen Thoraxaufnahme eher 0,30-0,40 zu erwarten, und 28,5 % der
-Bounding-Box-Flaeche lagen ausserhalb der Maske. Die Maske untersegmentiert
-also -- dieselbe Richtung wie der bekannte Kermany-Fehler, nur schwaecher.
+RAW CACHE, the reason for the second version of this script
+-----------------------------------------------------------
+The first run gave a lung area of 0.210. Anatomically, 0.30 to 0.40 is what a
+frontal chest radiograph should give, and 28.5 % of the bounding box area fell
+outside the mask. So the mask undersegments, the same direction as the known
+Kermany error, only weaker.
 
-Um verschiedene Verfeinerungen (konvexe Huelle, Dilatation) zu vergleichen,
-waere pro Variante ein neuer U-Net-Durchlauf noetig: 15 Minuten je Einstellung.
-Das ist unnoetig, denn teuer ist nur der Forward-Pass; die Verfeinerung ist
-Bildmorphologie auf einem fertigen Binaerbild. Deshalb wird die ROHE
-U-Net-Ausgabe (256x256, binaer) einmal als gepackte Bits gecacht --
-1500 Bilder ergeben rund 12 MB. Danach kostet jede weitere Variante Sekunden.
+Comparing refinements (convex hull, dilation) would cost a fresh U-Net run per
+variant: 15 minutes per setting. That is unnecessary, because only the forward
+pass, one run of the images through the network, is expensive; the refinement is
+image morphology on a finished binary image. So the RAW U-Net output (256x256,
+binary) is cached once as packed bits. 1500 images come to about 12 MB. After
+that every further variant costs seconds.
 
-`--refine` waehlt die Verfeinerung, ohne die Modulglobalen in
-`segmentation/mask_refine.py` zu veraendern. Das ist Absicht: eine Sweep-Schleife
-soll mehrere Einstellungen in EINEM Prozess durchrechnen koennen, und globale
-Schalter umzusetzen waere dabei eine Fehlerquelle, die still das falsche
-Ergebnis liefert.
+`--refine` picks the refinement without changing the module globals in
+`segmentation/mask_refine.py`. That is deliberate: a sweep loop has to compute
+several settings in ONE process, and flipping global switches on the way would be
+a source of error that silently returns the wrong result.
 
-Ausgabe: `data/rsna/masks224/{patientId}.png`, 0/255, 224x224 -- genau das
-Raster, in dem `pytorch_grad_cam` die Heatmap zurueckgibt. Maske und Heatmap
-sind damit ohne Umrechnung deckungsgleich.
+Output: `data/rsna/masks224/{patientId}.png`, 0/255, 224x224, exactly the grid in
+which `pytorch_grad_cam` returns the heatmap. Mask and heatmap therefore line up
+without any rescaling.
+
+How to read the two QC numbers:
+  Mask area is the fraction of the image the mask covers. Around 0.30 to 0.40 is
+  the anatomical expectation for a frontal chest image.
+  The area leak AUC asks whether mask area alone separates the classes. Its null
+  is 0.5, meaning the area betrays nothing about the class. On Kermany, the
+  earlier paediatric data set, it was 0.255, which is what a mask that encodes
+  the pathology looks like.
 
 CLI:
-  # erster Lauf: Masken + Roh-Cache anlegen (~15 min CPU)
+  # first run: create masks and raw cache (~15 min CPU)
   python rsna_make_masks.py --ids-from "predictions_rsna/cam_f*_s0.csv" \
       --raw-cache data/rsna/unet_raw256.npz
 
-  # grosser Lauf: alle 22 872 Entwicklungsbilder, fortsetzbar
-  #   --flush-every ist hier keine Feinheit, sondern Bedingung: ohne den
-  #   Zwischenstand liegen 1,4 GiB Rohmasken bis zum Ende im Speicher, und
-  #   ein Abbruch in Stunde drei kostet drei Stunden. Derselbe Aufruf noch
-  #   einmal setzt den Lauf da fort, wo er stand.
+  # large run: all 22,872 development images, resumable
+  #   --flush-every is not a nicety here but a condition. Without the
+  #   intermediate saves, 1.4 GiB of raw masks sit in memory until the end, and
+  #   an abort in hour three costs three hours. The same call once more resumes
+  #   the run where it stopped.
   python rsna_make_masks.py --ids-from qc/dev_ids.csv \
       --masks data/rsna/masks224_dev --raw-cache data/rsna/unet_raw256.npz \
       --refine hull --dilate-px 8 --flush-every 2000 --device directml
 
-  # Variante aus dem Cache, ohne U-Net (Sekunden)
+  # variant from the cache, without the U-Net (seconds)
   python rsna_make_masks.py --from-cache data/rsna/unet_raw256.npz \
       --refine hull --dilate-px 4 --masks data/rsna/masks224_hull4
 
-  # nur Vorschau/Statistik neu
+  # preview and statistics only
   python rsna_make_masks.py --ids-from "predictions_rsna/cam_f*_s0.csv" --qc-only
 """
 
@@ -80,31 +88,31 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-SEG_SIZE = 256          # so hat das U-Net gelernt
-OUT_SIZE = 224          # so kommt die Heatmap zurueck
+SEG_SIZE = 256          # the size the U-Net learned on
+OUT_SIZE = 224          # the size the heatmap comes back in
 DEFAULT_CKPT = Path("checkpoints/unet_best.pth")
 REFINE_CHOICES = ("none", "default", "hull")
 
 
 # --------------------------------------------------------------------------
-# ID-Auswahl  (testbar ohne Torch)
+# ID selection  (testable without Torch)
 # --------------------------------------------------------------------------
 
 def ids_from_csvs(patterns: list[str]) -> list[str]:
-    """patientIds aus einer oder mehreren CSVs sammeln, dedupliziert, sortiert."""
+    """Collect patientIds from one or more CSVs, deduplicated and sorted."""
     paths: list[str] = []
     for pat in patterns:
         hits = sorted(globmod.glob(pat))
         if not hits:
-            raise FileNotFoundError(f"Kein Treffer fuer Muster: {pat}")
+            raise FileNotFoundError(f"No match for pattern: {pat}")
         paths.extend(hits)
 
     ids: list[str] = []
     for p in paths:
         df = pd.read_csv(p)
         if "patientId" not in df.columns:
-            raise ValueError(f"{p}: Spalte 'patientId' fehlt "
-                             f"(vorhanden: {list(df.columns)})")
+            raise ValueError(f"{p}: column 'patientId' is missing "
+                             f"(present: {list(df.columns)})")
         ids.extend(df["patientId"].astype(str).tolist())
     return sorted(set(ids))
 
@@ -114,17 +122,17 @@ def ids_from_dir(root: Path) -> list[str]:
 
 
 def balanced_sample(splits_path: Path, n_per_class: int, seed: int = 0) -> list[str]:
-    """n Bilder je Klasse aus der ENTWICKLUNGSMENGE ziehen (Holdout bleibt aussen vor).
+    """Draw n images per class from the DEVELOPMENT set (the holdout stays out).
 
-    Gebraucht fuer jede Messung, die beide Klassen braucht -- etwa "verraten die
-    Zuschnitt-Parameter das Label?". Der vorhandene Roh-Cache taugt dafuer
-    nicht: er stammt aus den Grad-CAM-Stichproben, und Grad-CAM wurde nur auf
-    POSITIVEN Bildern gerechnet. Alle 1500 Eintraege haben Target=1, eine AUC
-    ist darauf nicht bestimmbar.
+    Needed for every measurement that requires both classes, such as "do the crop
+    parameters give away the label?". The existing raw cache is no use for that:
+    it comes from the Grad-CAM samples, and Grad-CAM, the heatmap showing where
+    the classifier looked, was computed on POSITIVE images only. All 1500 entries
+    have Target=1, and an AUC cannot be determined from that.
 
-    Der Holdout wird ausdruecklich ausgeschlossen. Er ist fuer genau eine
-    Auswertung reserviert; ihn fuer eine Vorbereitungsmessung anzufassen waere
-    still verbrannte Evidenz.
+    The holdout is excluded explicitly. It is reserved for exactly one
+    evaluation; touching it for a preparatory measurement would burn that
+    evidence silently.
     """
     sp = json.loads(Path(splits_path).read_text())
     holdout = set(sp.get("holdout", []))
@@ -143,14 +151,13 @@ def pending_jobs(ids: list[str], src: Path, dst: Path,
                  overwrite: bool,
                  cached: set[str] | None = None,
                  ) -> tuple[list[tuple[Path, Path]], int, int]:
-    """(zu rechnende Paare, uebersprungen, fehlende Quellbilder).
+    """(pairs still to compute, skipped, missing source images).
 
-    `cached` haelt die ids, die bereits IM ROH-CACHE stehen. Wird ein Cache
-    gefuehrt, reicht die vorhandene Masken-PNG als Abbruchkriterium nicht: ein
-    abgebrochener Lauf kann die PNG geschrieben, den Cache-Block danach aber
-    nicht mehr geleert haben. Ohne diese Pruefung faellt genau dieses Bild bei
-    der Fortsetzung durch beide Raster und fehlt im Cache dauerhaft -- still,
-    und erst beim Zuschnitt bemerkbar.
+    `cached` holds the ids that are already IN THE RAW CACHE. Once a cache is
+    kept, an existing mask PNG is not enough as a stop criterion: an aborted run
+    may have written the PNG and then never flushed the cache block behind it.
+    Without this check that one image falls through both filters on resume and is
+    missing from the cache for good, silently, and noticeable only at crop time.
     """
     jobs, skipped, missing = [], 0, 0
     for pid in ids:
@@ -168,11 +175,11 @@ def pending_jobs(ids: list[str], src: Path, dst: Path,
 
 
 # --------------------------------------------------------------------------
-# Roh-Cache: gepackte Bits  (testbar ohne Torch)
+# Raw cache: packed bits  (testable without Torch)
 # --------------------------------------------------------------------------
 
 def pack_masks(masks: np.ndarray) -> np.ndarray:
-    """[n,256,256] bool -> [n, 8192] uint8. Faktor 8 gegenueber bool."""
+    """[n,256,256] bool -> [n, 8192] uint8. Factor of 8 against bool."""
     m = np.asarray(masks, dtype=bool).reshape(len(masks), -1)
     return np.packbits(m, axis=1)
 
@@ -184,21 +191,26 @@ def unpack_masks(packed: np.ndarray, shape=(SEG_SIZE, SEG_SIZE)) -> np.ndarray:
 
 
 def save_raw_cache(path: Path, ids: list[str], masks: np.ndarray) -> None:
-    """Neue Eintraege in einen vorhandenen Cache mischen (Lauf ist fortsetzbar).
+    """Merge new entries into an existing cache, which keeps a run resumable.
 
-    ATOMAR schreiben. Der Cache waechst auf ~190 MB; wird er an Ort und Stelle
-    ueberschrieben und bricht der Lauf waehrend des Schreibens ab, ist nicht
-    der letzte Block verloren, sondern alles. Deshalb erst daneben schreiben,
-    dann umbenennen -- os.replace ist innerhalb eines Dateisystems atomar.
+    Write ATOMICALLY. The cache grows to about 190 MB; overwritten in place, a
+    run that dies mid-write loses not the last block but everything. So write
+    next to it first, then rename: os.replace is atomic within one file system.
+
+    EVERY np.load here sits in a `with`. A `.npz` is a ZIP archive, and `np.load`
+    returns a LAZY `NpzFile` that holds the file open until it is closed. On
+    Windows `os.replace` then fails with "WinError 5: access denied", because an
+    open file cannot be replaced there. On Linux it would have gone through
+    silently, which would only have made the bug later and harder to find.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     old_ids: list[str] = []
     old_packed = np.zeros((0, SEG_SIZE * SEG_SIZE // 8), np.uint8)
     if path.exists():
-        z = np.load(path, allow_pickle=False)
-        old_ids = [str(s) for s in z["ids"]]
-        old_packed = z["packed"]
+        with np.load(path, allow_pickle=False) as z:
+            old_ids = [str(s) for s in z["ids"]]
+            old_packed = np.asarray(z["packed"])      # fetch before closing
 
     merged: dict[str, np.ndarray] = dict(zip(old_ids, old_packed))
     merged.update(dict(zip(ids, pack_masks(masks))))
@@ -210,44 +222,44 @@ def save_raw_cache(path: Path, ids: list[str], masks: np.ndarray) -> None:
 
 
 def load_raw_cache(path: Path) -> tuple[list[str], np.ndarray]:
-    z = np.load(Path(path), allow_pickle=False)
-    return [str(s) for s in z["ids"]], z["packed"]
+    with np.load(Path(path), allow_pickle=False) as z:
+        return [str(s) for s in z["ids"]], np.asarray(z["packed"])
 
 
 def cached_ids(path: Path | None) -> set[str]:
-    """Welche ids stehen schon im Roh-Cache? Leere Menge, wenn es ihn nicht gibt."""
+    """Which ids are in the raw cache already? Empty set if there is none."""
     if path is None or not Path(path).exists():
         return set()
     try:
-        z = np.load(Path(path), allow_pickle=False)
-        return {str(s) for s in z["ids"]}
-    except Exception as e:                       # halb geschriebene Datei
-        print(f"  WARNUNG: Roh-Cache nicht lesbar ({e}) -- wird neu aufgebaut.")
+        with np.load(Path(path), allow_pickle=False) as z:
+            return {str(s) for s in z["ids"]}
+    except Exception as e:                       # half-written file
+        print(f"  WARNING: raw cache not readable ({e}). It will be rebuilt.")
         return set()
 
 
 # --------------------------------------------------------------------------
-# Verfeinerung  (testbar ohne Torch)
+# Refinement  (testable without Torch)
 # --------------------------------------------------------------------------
 
 def refine_variant(raw: np.ndarray, mode: str = "default",
                    dilate_px: int = 0) -> np.ndarray:
-    """Verfeinerung mit EXPLIZITEN Parametern statt Modulglobalen.
+    """Refinement with EXPLICIT parameters instead of module globals.
 
     mode:
-      none     nur die rohe U-Net-Ausgabe (Kontrolle: was macht die
-               Nachbearbeitung ueberhaupt?)
-      default  saeubern + Symmetriefuellung (die bisherige Einstellung)
-      hull     zusaetzlich konvexe Huelle je Lunge -- holt die Flaeche zurueck,
-               die eine Konsolidierung dem Segmenter wegnimmt
+      none     the raw U-Net output only (a control: what does the
+               post-processing do at all?)
+      default  clean up + symmetry fill (the setting used so far)
+      hull     additionally a convex hull per lung, which recovers the area a
+               consolidation takes away from the segmenter
 
-    dilate_px weitet die fertige Maske elliptisch auf. Das ist bewusst grob:
-    es geht nicht um anatomische Genauigkeit, sondern um die Frage, ob der
-    gemessene Spielraum verschwindet, sobald die Maske nicht mehr zu klein ist.
-    Wenn ja, war der Spielraum ein Maskenartefakt.
+    dilate_px widens the finished mask elliptically. That is deliberately crude.
+    The point is not anatomical accuracy but whether the measured headroom
+    disappears once the mask is no longer too small. If it does, the headroom was
+    an artefact of the mask.
     """
     if mode not in REFINE_CHOICES:
-        raise ValueError(f"mode muss in {REFINE_CHOICES} liegen, war {mode!r}")
+        raise ValueError(f"mode must be one of {REFINE_CHOICES}, was {mode!r}")
 
     import cv2
 
@@ -268,19 +280,19 @@ def refine_variant(raw: np.ndarray, mode: str = "default",
 
 
 def to_out(mask: np.ndarray, out_size: int = OUT_SIZE) -> np.ndarray:
-    """Auf Klassifikatorraster bringen. NEAREST haelt die Maske binaer --
-    bilinear erzeugte Grauwerte an den Raendern und verfaelschte die Flaeche."""
+    """Bring to the classifier grid. NEAREST keeps the mask binary; bilinear
+    produced grey values at the borders and distorted the area."""
     import cv2
     m = (np.asarray(mask, dtype=bool).astype(np.uint8) * 255)
     return cv2.resize(m, (out_size, out_size), interpolation=cv2.INTER_NEAREST)
 
 
 def area_report(areas: np.ndarray) -> dict:
-    """Kennzahlen der Maskenflaeche -- die QC-Zahl neben dem Augenschein.
+    """Mask area statistics, the QC number next to the visual check.
 
-    Eine plausible Lunge belegt in einer frontalen Thoraxaufnahme grob 0,30-0,40
-    der Bildflaeche. Der erste RSNA-Lauf lag bei 0,210: zu klein. Nahe 0 heisst,
-    der Segmenter hat aufgegeben; ueber ~0,60, er hat das halbe Bild eingesammelt.
+    A plausible lung covers roughly 0.30 to 0.40 of a frontal chest radiograph.
+    The first RSNA run came out at 0.210: too small. Near 0 means the segmenter
+    gave up; above about 0.60 it has collected half the image.
     """
     a = np.asarray(areas, dtype=float)
     if a.size == 0:
@@ -294,33 +306,59 @@ def area_report(areas: np.ndarray) -> dict:
         "p95": float(np.percentile(a, 95)),
         "n_empty": int((a < 0.05).sum()),
         "n_huge": int((a > 0.60).sum()),
-        "n_small": int((a < 0.22).sum()),      # unter anatomischer Erwartung
+        "n_small": int((a < 0.22).sum()),      # below the anatomical expectation
     }
 
 
 # --------------------------------------------------------------------------
-# Torch-Teil
+# Torch part
 # --------------------------------------------------------------------------
 
+def resolve_device(name: str):
+    """Translate a device name into a Torch device, with the same logic as
+    training.
+
+    The reason for this detour: `"directml"` is NOT a Torch device name. Torch
+    knows cpu/cuda/xpu/..., and `.to("directml")` dies with "Expected one of cpu,
+    cuda, ... at start of device string". Only `torch_directml.device()` returns
+    the device.
+
+    `rsna_train.pick_device` on purpose and no local copy: this translation
+    missing here while training had it is precisely what the bug was. Two
+    versions of the same rule drift apart again.
+
+    IDEMPOTENT. An already resolved device is handed back unchanged. Without that
+    line a second call falls through every name comparison and silently returns
+    the CPU. The run would still run, twenty times slower, and nobody would see
+    an error.
+    """
+    if not isinstance(name, str):
+        return name
+    from rsna_train import pick_device
+    dev, _ = pick_device(name)
+    return dev
+
+
 def _load_unet(ckpt: Path, device: str):
-    """U-Net laden. Checkpoint IMMER auf die CPU, dann ins Modell kopieren.
+    """Load the U-Net. The checkpoint, meaning the saved trained weights, goes to
+    the CPU ALWAYS and is copied into the model from there.
 
-    `map_location=<DirectML-Geraet>` stirbt mit
+    `map_location=<DirectML device>` dies with
     "TypeError: '>=' not supported between instances of 'torch.device' and 'int'",
-    weil Torch das device-Objekt an `torch_directml.device()` weiterreicht, die
-    dort einen Integer-Index erwartet. Der Fehler sieht aus wie ein kaputter
-    Checkpoint und ist keiner.
+    because Torch passes the device object on to `torch_directml.device()`, which
+    expects an integer index there. The error looks like a broken checkpoint and
+    is not one.
 
-    `weights_only=True` unterdrueckt zugleich die FutureWarning; der Fallback
-    faengt nur alte Torch-Versionen ohne dieses Argument ab.
+    `weights_only=True` also suppresses the FutureWarning; the fallback catches
+    old Torch versions without that argument only.
     """
     import torch
     from segmentation.unet import UNet
 
-    model = UNet(base_ch=32).to(device)
+    model = UNet(base_ch=32).to(resolve_device(device))
     try:
         state = torch.load(str(ckpt), map_location="cpu", weights_only=True)
-    except TypeError:                       # aeltere Torch-Versionen
+    except TypeError:                       # older Torch versions
         state = torch.load(str(ckpt), map_location="cpu")
     model.load_state_dict(state)
     model.eval()
@@ -328,7 +366,7 @@ def _load_unet(ckpt: Path, device: str):
 
 
 def _preprocess(path: Path):
-    """Exakt wie im Segmenter-Training: Graustufe, 256x256 bilinear, [0,1]."""
+    """Exactly as in segmenter training: grayscale, 256x256 bilinear, [0,1]."""
     from torchvision.transforms import InterpolationMode
     from torchvision.transforms import functional as TF
 
@@ -342,33 +380,33 @@ def generate(jobs: list[tuple[Path, Path]], ckpt: Path, device: str, batch: int,
              mode: str, dilate_px: int,
              raw_cache: Path | None,
              flush_every: int = 0) -> tuple[np.ndarray, list[str], np.ndarray]:
-    """Masken rechnen und ablegen. Gibt (Flaechen, ids, rohe 256er-Masken) zurueck.
+    """Compute masks and store them. Returns (areas, ids, raw 256x256 masks).
 
-    `flush_every > 0` schreibt den Roh-Cache alle N Bilder weg und leert den
-    Puffer. Zwei Gruende, beide bei 22 872 Bildern zwingend:
+    `flush_every > 0` writes the raw cache out every N images and empties the
+    buffer. Two reasons, both binding at 22,872 images:
 
-      Speicher. Ein Roh-Bild ist 256x256 bool = 64 KiB; alle zusammen 1,4 GiB,
-      und `np.stack` am Ende verdoppelt das kurzzeitig.
+      Memory. One raw image is 256x256 bool = 64 KiB, all of them together
+      1.4 GiB, and `np.stack` at the end briefly doubles that.
 
-      Verlust. Ohne Zwischenstand kostet ein Abbruch in Stunde drei die ganzen
-      drei Stunden. Mit Zwischenstand kostet er hoechstens N Bilder, und
-      `pending_jobs(..., cached=...)` nimmt den Lauf genau dort wieder auf.
+      Loss. Without intermediate saves an abort in hour three costs all three
+      hours. With them it costs at most N images, and
+      `pending_jobs(..., cached=...)` picks the run up again exactly there.
 
-    Bei flush_every=0 (Vorgabe, kleine Laeufe) verhaelt sich die Funktion
-    unveraendert: der Puffer wird zurueckgegeben und main() speichert einmal.
-    Bei flush_every>0 ist beim Verlassen bereits alles im Cache -- dann kommt
-    ein LEERER Puffer zurueck, damit main() nicht ein zweites Mal schreibt.
+    At flush_every=0 (the default, small runs) the buffer is returned and main()
+    saves once. At flush_every>0 everything is in the cache already on exit, so
+    an EMPTY buffer comes back and main() does not write a second time.
     """
     import torch
 
-    model = _load_unet(ckpt, device)
+    dev = resolve_device(device)          # translate once, then use everywhere
+    model = _load_unet(ckpt, dev)
     areas, ids, raws = [], [], []
     n_flushed = 0
     total = len(jobs)
     t0 = time.time()
 
     def flush() -> int:
-        """Puffer in den Cache mischen und leeren. Gibt die Anzahl zurueck."""
+        """Merge the buffer into the cache and empty it. Returns the count."""
         nonlocal ids, raws
         if raw_cache is None or not ids:
             return 0
@@ -380,7 +418,7 @@ def generate(jobs: list[tuple[Path, Path]], ckpt: Path, device: str, batch: int,
     with torch.no_grad():
         for i in range(0, total, batch):
             chunk = jobs[i:i + batch]
-            x = torch.stack([_preprocess(s) for s, _ in chunk]).to(device)
+            x = torch.stack([_preprocess(s) for s, _ in chunk]).to(dev)
             pred = (torch.sigmoid(model(x)) > 0.5).cpu().numpy()[:, 0]
             for (src, out_path), p in zip(chunk, pred):
                 out = to_out(refine_variant(p, mode, dilate_px))
@@ -393,12 +431,12 @@ def generate(jobs: list[tuple[Path, Path]], ckpt: Path, device: str, batch: int,
             if done % (batch * 10) == 0 or done == total:
                 el = time.time() - t0
                 rest = el / done * (total - done)
-                print(f"    Masken {done}/{total}  "
-                      f"({el / 60:.0f} min gelaufen, noch ~{rest / 60:.0f} min)",
+                print(f"    masks {done}/{total}  "
+                      f"({el / 60:.0f} min elapsed, ~{rest / 60:.0f} min left)",
                       flush=True)
             if flush_every and len(ids) >= flush_every:
                 n_flushed += flush()
-                print(f"    Zwischenstand gesichert ({n_flushed} in diesem Lauf)",
+                print(f"    intermediate save done ({n_flushed} in this run)",
                       flush=True)
 
     if flush_every:
@@ -411,7 +449,7 @@ def generate(jobs: list[tuple[Path, Path]], ckpt: Path, device: str, batch: int,
 
 def from_cache(cache: Path, dst: Path, mode: str, dilate_px: int,
                only: list[str] | None) -> np.ndarray:
-    """Masken aus dem Roh-Cache neu verfeinern -- ohne Torch, in Sekunden."""
+    """Re-refine masks from the raw cache, without Torch, in seconds."""
     ids, packed = load_raw_cache(cache)
     keep = set(only) if only else None
     Path(dst).mkdir(parents=True, exist_ok=True)
@@ -442,12 +480,12 @@ def measured_areas(ids: list[str], dst: Path) -> np.ndarray:
 
 def qc_preview(ids: list[str], src: Path, dst: Path, csv_dir: Path,
                out_png: Path, n_per_class: int = 4, seed: int = 0) -> None:
-    """Vorschau mit ueberlagerter Maske, getrennt nach Label.
+    """Preview with the mask overlaid, split by label.
 
-    Getrennt nach Label, weil genau dort der bekannte Fehler sitzt: auf Kermany
-    wurden Pneumonie-Lungen UNTERsegmentiert (die Konsolidierung sieht dem
-    Segmenter nicht nach Lunge aus). Wenn das wiederkommt, muss es sichtbar
-    sein, bevor die Maske irgendetwas entscheidet.
+    Split by label, because that is where the known error sits: on Kermany,
+    pneumonic lungs were UNDERsegmented (the consolidation does not look like
+    lung to the segmenter). If that comes back, it has to be visible before the
+    mask decides anything.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -467,7 +505,7 @@ def qc_preview(ids: list[str], src: Path, dst: Path, csv_dir: Path,
         rows.extend((name, str(p)) for p in pick)
 
     if not rows:
-        print("  QC: keine Masken zum Anzeigen gefunden.")
+        print("  QC: no masks found to display.")
         return
 
     fig, axes = plt.subplots(len(rows), 2, figsize=(6, 3 * len(rows)),
@@ -480,25 +518,25 @@ def qc_preview(ids: list[str], src: Path, dst: Path, csv_dir: Path,
         axes[r][0].set_title(f"{name}  {pid[:8]}", fontsize=8)
         axes[r][1].imshow(img, cmap="gray")
         axes[r][1].imshow(m, cmap="Reds", alpha=0.35)
-        axes[r][1].set_title(f"Maske  Flaeche {m.mean():.3f}", fontsize=8)
+        axes[r][1].set_title(f"mask  area {m.mean():.3f}", fontsize=8)
         for c in (0, 1):
             axes[r][c].set_xticks([]); axes[r][c].set_yticks([])
     plt.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_png, dpi=90)
     plt.close(fig)
-    print(f"  QC-Vorschau: {out_png}")
+    print(f"  QC preview: {out_png}")
 
 
 def area_leak_check(ids: list[str], dst: Path, csv_dir: Path) -> float | None:
-    """Verraet die Maskenflaeche allein schon die Klasse?
+    """Does mask area on its own already give away the class?
 
-    Genau der Leak, der auf Kermany gefunden wurde (lung_area AUC ~0,255).
-    Muss VOR jedem Crop-Experiment bekannt sein: ein Crop auf eine Maske, deren
-    Groesse die Klasse verraet, baut den Shortcut ins Bild ein.
+    Exactly the leak that was found on Kermany (lung_area AUC ~0.255). It has to
+    be known BEFORE any crop experiment: a crop onto a mask whose size gives away
+    the class builds the shortcut into the image.
 
-    None, wenn nur eine Klasse vorliegt -- der CAM-Teilmenge fehlen die
-    Negativen, weil Grad-CAM nur auf positiven Bildern gemessen wurde.
+    None if only one class is present. The CAM subset has no negatives, because
+    Grad-CAM was measured on positive images only.
     """
     from sklearn.metrics import roc_auc_score
 
@@ -519,15 +557,15 @@ def area_leak_check(ids: list[str], dst: Path, csv_dir: Path) -> float | None:
 def print_area(rep: dict) -> None:
     if not rep:
         return
-    print(f"\nMaskenflaeche (Anteil des Bildes), n={rep['n']}:")
-    print(f"  Mittel {rep['mean']:.3f} +- {rep['sd']:.3f} | P05 {rep['p05']:.3f} | "
-          f"Median {rep['median']:.3f} | P95 {rep['p95']:.3f}")
-    print(f"  leer (<0,05): {rep['n_empty']} | riesig (>0,60): {rep['n_huge']} | "
-          f"unter anatomischer Erwartung (<0,22): {rep['n_small']}")
+    print(f"\nMask area (fraction of the image), n={rep['n']}:")
+    print(f"  mean {rep['mean']:.3f} +- {rep['sd']:.3f} | P05 {rep['p05']:.3f} | "
+          f"median {rep['median']:.3f} | P95 {rep['p95']:.3f}")
+    print(f"  empty (<0.05): {rep['n_empty']} | huge (>0.60): {rep['n_huge']} | "
+          f"below anatomical expectation (<0.22): {rep['n_small']}")
     if rep["mean"] < 0.26:
-        print("  -> ZU KLEIN. Anatomisch sind ~0,30-0,40 zu erwarten. Eine zu kleine")
-        print("     Maske erzeugt 'Maximum ausserhalb der Lunge' von selbst.")
-        print("     Gegenmittel: --refine hull und/oder --dilate-px.")
+        print("  -> TOO SMALL. Anatomically ~0.30 to 0.40 is expected. A mask")
+        print("     that is too small produces 'peak outside the lung' by itself.")
+        print("     Remedy: --refine hull and/or --dilate-px.")
 
 
 # --------------------------------------------------------------------------
@@ -540,22 +578,24 @@ def main(argv=None) -> int:
     p.add_argument("--csv", type=Path, default=Path("data/rsna"))
     p.add_argument("--ckpt", type=Path, default=DEFAULT_CKPT)
     p.add_argument("--ids-from", nargs="+", default=None,
-                   help="CSV(s) mit Spalte patientId; Glob erlaubt")
+                   help="CSV(s) with a patientId column; glob allowed")
     p.add_argument("--all", action="store_true",
-                   help="alle PNGs unter --images (26 684 Stueck, ~1 h)")
+                   help="all PNGs under --images (26,684 of them, ~1 h)")
     p.add_argument("--balanced-sample", type=int, default=None,
                    metavar="N",
-                   help="N Bilder JE KLASSE aus der Entwicklungsmenge (Holdout "
-                        "ausgeschlossen) -- fuer Messungen, die beide Klassen brauchen")
+                   help="N images PER CLASS from the development set (holdout "
+                        "excluded), for measurements that need both classes")
     p.add_argument("--splits", type=Path, default=Path("rsna_splits.json"))
     p.add_argument("--refine", choices=REFINE_CHOICES, default="default",
-                   help="none = roh | default = saeubern+Symmetrie | hull = zusaetzlich konvexe Huelle")
+                   help="none = raw | default = clean+symmetry | "
+                        "hull = plus convex hull")
     p.add_argument("--dilate-px", type=int, default=0,
-                   help="Maske um N Pixel (im 256er Raster) aufweiten")
+                   help="widen the mask by N pixels (in the 256 grid)")
     p.add_argument("--raw-cache", type=Path, default=None,
-                   help="rohe U-Net-Ausgabe hierhin cachen (macht Varianten spaeter gratis)")
+                   help="cache the raw U-Net output here (later variants "
+                        "then cost nothing)")
     p.add_argument("--from-cache", type=Path, default=None,
-                   help="Masken aus dem Roh-Cache neu verfeinern, ohne U-Net")
+                   help="re-refine masks from the raw cache, without the U-Net")
     p.add_argument("--device", default="cpu")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--overwrite", action="store_true")
@@ -563,18 +603,18 @@ def main(argv=None) -> int:
     p.add_argument("--qc-out", type=Path, default=None)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--flush-every", type=int, default=0, metavar="N",
-                   help="Roh-Cache alle N Bilder sichern -- der Lauf wird damit "
-                        "fortsetzbar. Fuer grosse Laeufe zwingend, sonst liegen "
-                        "1,4 GiB Rohmasken bis zum Ende im Speicher.")
+                   help="save the raw cache every N images, which makes the run "
+                        "resumable. Required for large runs, otherwise 1.4 GiB "
+                        "of raw masks sit in memory until the end.")
     args = p.parse_args(argv)
 
     if not (args.all or args.ids_from or args.from_cache or args.balanced_sample):
-        p.error("--ids-from, --all, --balanced-sample oder --from-cache angeben")
+        p.error("give one of --ids-from, --all, --balanced-sample or --from-cache")
     qc_out = args.qc_out or Path("qc") / f"rsna_mask_qc_{args.masks.name}.png"
 
     args.masks.mkdir(parents=True, exist_ok=True)
 
-    # ---- Weg A: aus dem Roh-Cache, ohne Torch ------------------------------
+    # ---- path A: from the raw cache, without Torch --------------------------
     if args.from_cache:
         only = None
         if args.ids_from:
@@ -583,14 +623,14 @@ def main(argv=None) -> int:
             only = balanced_sample(args.splits, args.balanced_sample, args.seed)
         elif args.all:
             only = ids_from_dir(args.images)
-        print(f"Aus Roh-Cache: {args.from_cache} | refine={args.refine} "
+        print(f"From raw cache: {args.from_cache} | refine={args.refine} "
               f"dilate={args.dilate_px} -> {args.masks}")
         areas = from_cache(args.from_cache, args.masks, args.refine,
                            args.dilate_px, only)
         ids = ids_from_dir(args.masks)
-        print(f"  {len(areas)} Masken geschrieben (kein U-Net noetig).")
+        print(f"  {len(areas)} masks written (no U-Net needed).")
 
-    # ---- Weg B: U-Net rechnen ---------------------------------------------
+    # ---- path B: run the U-Net ---------------------------------------------
     else:
         if args.balanced_sample:
             ids = balanced_sample(args.splits, args.balanced_sample, args.seed)
@@ -598,29 +638,29 @@ def main(argv=None) -> int:
             ids = ids_from_dir(args.images)
         else:
             ids = ids_from_csvs(args.ids_from)
-        print(f"Bilder in der Auswahl: {len(ids)}")
+        print(f"Images in the selection: {len(ids)}")
         have = cached_ids(args.raw_cache) if args.raw_cache is not None else None
         if have is not None:
-            print(f"  bereits im Roh-Cache: {len(have)}")
+            print(f"  already in the raw cache: {len(have)}")
         jobs, skipped, missing = pending_jobs(ids, args.images, args.masks,
                                               args.overwrite, cached=have)
-        print(f"  zu rechnen: {len(jobs)} | vorhanden: {skipped} | "
-              f"Quelle fehlt: {missing}")
+        print(f"  to compute: {len(jobs)} | present: {skipped} | "
+              f"source missing: {missing}")
         if missing:
-            print("  ACHTUNG: fehlende Quellbilder deuten auf einen falschen "
-                  "--images-Pfad oder eine unvollstaendige Konvertierung hin.")
+            print("  CAUTION: missing source images point to a wrong --images "
+                  "path or to an incomplete conversion.")
 
         if args.qc_only:
-            print("  --qc-only: es wird nichts gerechnet.")
+            print("  --qc-only: nothing will be computed.")
         elif jobs:
             if not args.ckpt.exists():
-                print(f"FEHLER: Checkpoint fehlt: {args.ckpt}")
+                print(f"ERROR: checkpoint missing: {args.ckpt}")
                 return 2
-            print(f"  Geraet: {args.device} | Checkpoint: {args.ckpt} | "
+            print(f"  device: {args.device} | checkpoint: {args.ckpt} | "
                   f"refine={args.refine} dilate={args.dilate_px}")
             if args.flush_every:
-                print(f"  Roh-Cache wird alle {args.flush_every} Bilder gesichert "
-                      f"-- ein Abbruch kostet ab dann hoechstens so viele Bilder.")
+                print(f"  raw cache is saved every {args.flush_every} images. "
+                      f"From then on an abort costs at most that many images.")
             _, cids, raws = generate(jobs, args.ckpt, args.device, args.batch,
                                      args.refine, args.dilate_px, args.raw_cache,
                                      flush_every=args.flush_every)
@@ -628,23 +668,23 @@ def main(argv=None) -> int:
                 save_raw_cache(args.raw_cache, cids, raws)
             if args.raw_cache is not None:
                 n_now = len(cached_ids(args.raw_cache))
-                print(f"  Roh-Cache: {args.raw_cache} ({n_now} Eintraege insgesamt)")
-                print("  -> weitere Varianten jetzt mit --from-cache, ohne U-Net.")
+                print(f"  raw cache: {args.raw_cache} ({n_now} entries in total)")
+                print("  -> further variants now with --from-cache, no U-Net.")
         else:
-            print("  nichts zu tun (alle Masken liegen vor).")
+            print("  nothing to do (all masks are present).")
 
-    # ---- QC: Zahlen zuerst, Bild danach -----------------------------------
+    # ---- QC: numbers first, picture afterwards ------------------------------
     print_area(area_report(measured_areas(ids, args.masks)))
 
     auc = area_leak_check(ids, args.masks, args.csv)
     if auc is None:
-        print("\nFlaechen-Leak: nicht bestimmbar (nur eine Klasse in der Auswahl).")
+        print("\nArea leak: not determinable (only one class in the selection).")
     else:
-        print(f"\nFlaechen-Leak: AUC(Maskenflaeche -> Target) = {auc:.3f}")
-        print("  0,5 = Flaeche verraet nichts. Auf Kermany war sie 0,255.")
+        print(f"\nArea leak: AUC(mask area -> Target) = {auc:.3f}")
+        print("  0.5 = the area gives nothing away. On Kermany it was 0.255.")
 
     qc_preview(ids, args.images, args.masks, args.csv, qc_out, seed=args.seed)
-    print("\nFertig. Erst die Vorschau ansehen, dann rsna_mask_sweep.py.")
+    print("\nDone. Look at the preview first, then rsna_mask_sweep.py.")
     return 0
 
 
