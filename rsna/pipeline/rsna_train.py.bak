@@ -86,41 +86,13 @@ How to read the result, written down before the first run:
 
   * PRIMARY: `AUC(model score -> ViewPosition)` must FALL. Baseline
     0.8166 +- 0.0098 over five folds.
-    MEASURED afterwards at strength 0.5, paired within fold:
-    -0.0334 +- 0.0086, t = -8.72 over five folds, every fold
-    negative. The endpoint held.
-    At strength 1.0, measured on the same five folds:
-    -0.0554 +- 0.0123, t = -10.05.
   * SECONDARY: the STRATIFIED AUC must NOT fall. Baseline 0.8449 +- 0.0147.
-    MEASURED afterwards at strength 0.5: -0.0144 +- 0.0086, paired
-    t = -3.72, every fold negative. The fall is real. It stays
-    0.0006 inside the tolerance of 0.015 that `rsna_crop_compare.py`
-    checks, so the approving verdict line of that script rests on a
-    margin far smaller than the effect it is judging. Report the two
-    numbers, never that verdict on its own.
-    At strength 1.0: -0.0181 +- 0.0058, t = -7.03, which is
-    OUTSIDE that tolerance. Paired against strength 0.5 the extra
-    cost is -0.0037 +- 0.0042, t = -1.94, which cannot be told
-    from noise, while the extra gain on the primary endpoint,
-    -0.0219 +- 0.0156, t = -3.15, can. The tolerance is a line
-    that was set, not one that was measured. Both doses lower the
-    stratified AUC and in both the fall is real.
   * The RAW AUC IS EXPECTED TO FALL, and that is the success, not a
     regression. The 0.880 contains the +0.044 contributed by `ViewPosition`.
     Removing the channel costs roughly that much, so a raw AUC sinking towards
     0.845 is the predicted signature of the intervention working. This has to
     stand here before the run, because afterwards it reads like a step
     backwards.
-    MEASURED afterwards at strength 0.5: the raw AUC falls by
-    0.0151 +- 0.0061, a third of the predicted 0.044. The direction
-    was right, the size was not, and the prediction stays in this
-    text because it was made before the run. Why the gap is open:
-    the two paths to the label are not additive, so what the model
-    loses on the projection channel it partly recovers from the
-    image. This patch does not test that reading.
-    At strength 1.0, where the association is cut completely, the
-    raw AUC still falls by only 0.0233 +- 0.0021. The gap to the
-    predicted 0.044 is therefore not an artefact of a half dose.
   * Calibration shifts, so the per-stratum thresholds move. They are searched
     on the selection split, which the reweighting does not touch.
 
@@ -573,9 +545,6 @@ def cam_vs_boxes(model, root: Path, ids: list[str], boxes: dict, size: int,
       mass   Which share of the heatmap mass lies inside the boxes?
              Chance baseline is again the area fraction.
 
-    Maps that are zero everywhere count as a miss (hit False, mass 0.0) and
-    are flagged in the `degenerate` column. See the comment in the loop.
-
     The area fraction MUST be reported with them. The boxes cover a substantial
     part of the image; a hit rate of 0.6 sounds good and would be next to
     nothing at an area fraction of 0.55. Without that baseline the number is
@@ -605,32 +574,20 @@ def cam_vs_boxes(model, root: Path, ids: list[str], boxes: dict, size: int,
         x = tf(img).unsqueeze(0)
         heat = cam(input_tensor=x, targets=[BinaryClassifierOutputTarget(1)])[0]
         heat = np.clip(heat, 0, None)
+        if heat.sum() <= 0:
+            continue
 
         mask = np.zeros_like(heat, bool)
         for bx, by, bw, bh in boxes[pid]:
             x0, y0 = int(bx * s), int(by * s)
             x1, y1 = int((bx + bw) * s), int((by + bh) * s)
             mask[max(y0, 0):y1, max(x0, 0):x1] = True
-        area = float(mask.mean())
 
-        # A map that is zero everywhere after clipping is a FAILURE to
-        # localise, not a missing measurement. It used to be skipped, which
-        # took the image out of the model's OWN denominator and therefore
-        # flattered exactly the model that produces degenerate maps. Measured
-        # over five folds at strength 0.5: 3 to 6 of 300 images per fold for
-        # the reweighted model, zero for the baseline. It counts as a miss
-        # now, and the count is reported so the reader can see how often it
-        # happens.
-        degenerate = bool(heat.sum() <= 0)
-        if degenerate:
-            row = {"patientId": pid, "hit": False, "mass": 0.0}
-        else:
-            yx = np.unravel_index(int(np.argmax(heat)), heat.shape)
-            row = {"patientId": pid, "hit": bool(mask[yx]),
-                   "mass": float(heat[mask].sum() / heat.sum())}
-        row.update({"area": area, "n_boxes": len(boxes[pid]),
-                    "degenerate": degenerate})
-        rows.append(row)
+        area = float(mask.mean())
+        yx = np.unravel_index(int(np.argmax(heat)), heat.shape)
+        rows.append({"patientId": pid, "hit": bool(mask[yx]),
+                     "mass": float(heat[mask].sum() / heat.sum()),
+                     "area": area, "n_boxes": len(boxes[pid])})
         if j % 100 == 0:
             print(f"      Grad-CAM {j}/{len(pick)}")
 
@@ -639,7 +596,6 @@ def cam_vs_boxes(model, root: Path, ids: list[str], boxes: dict, size: int,
         return {}, d
     res = {
         "cam_n": int(len(d)),
-        "cam_degenerate": int(d["degenerate"].sum()),
         "cam_hit": float(d["hit"].mean()),
         "cam_mass": float(d["mass"].mean()),
         "cam_area_baseline": float(d["area"].mean()),
@@ -734,12 +690,9 @@ def main() -> None:
               f"fully decoupled 0.500)")
         print("    PRIMARY endpoint: AUC(score -> ViewPosition) must fall "
               "from 0.8166 +- 0.0098.")
-        print("    The RAW AUC is expected to fall as well. That is "
-              "the success signature, not a regression.")
-        print("    Predicted before the runs: about 0.044. Measured "
-              "over five folds: 0.0151 +- 0.0061 at strength 0.5, "
-              "0.0233 +- 0.0021 at strength 1.0.")
-        print("    See the module header.")
+        print("    The RAW AUC is expected to fall by about 0.044 as well. "
+              "That is the success signature,")
+        print("    not a regression. See the module header.")
 
     tr = DataLoader(RsnaDataset(args.images, fit_ids, labels,
                                build_transforms(args.size, True)),
@@ -956,8 +909,6 @@ def main() -> None:
             print(f"  Mass     {cam_res['cam_mass']:.3f}  vs chance "
                   f"{cam_res['cam_area_baseline']:.3f}  "
                   f"(margin {cam_res['cam_mass_lift']:+.3f})")
-            print(f"  Degenerate maps {cam_res['cam_degenerate']} of "
-                  f"{cam_res['cam_n']}, counted as a miss (see cam_vs_boxes).")
             print("  Without the chance baseline the hit rate means nothing:")
             print("  the boxes cover a substantial part of the image.")
 

@@ -72,7 +72,14 @@ def _resolve(path: str) -> str:
     return path                                    # Fehlermeldung nennt das Original
 
 
-CHECKPOINT_PATH = _resolve(os.getenv("CHECKPOINT_PATH", "checkpoints/rsna_f4_s0.pth"))
+# Fold 4 der Variante mit voller Entkopplung (--balance-view --balance-strength
+# 1.0). Die frueher hier eingetragene Datei rsna_f4_s0.pth traegt nicht die
+# Basislinie, sondern das Zuschnitt-Modell: vor dem --tag-Schalter haben alle
+# Varianten in denselben Dateinamen geschrieben. Fold 4 ist unter den fuenf
+# Folds der mit der MITTLEREN geschichteten AUC (0,8233), also weder der beste
+# noch der schlechteste, damit die Demo nicht den Rosinen folgt.
+CHECKPOINT_PATH = _resolve(os.getenv("CHECKPOINT_PATH",
+                                     "checkpoints/rsna_f4_s0_bal10.pth"))
 
 # Welche Strecke das geladene Gewicht stammt. Das ist KEINE Kosmetik: die beiden
 # Strecken haben verschiedene Koepfe und verschiedene Vorverarbeitungen, und ein
@@ -94,7 +101,10 @@ MODEL_FAMILY = os.getenv("MODEL_FAMILY", "rsna").lower()
 INPUT_SIZE = int(os.getenv("INPUT_SIZE", "224"))       # rsna_train.py --size, Vorgabe 224
 TEST_DIR = _resolve(os.getenv("TEST_DIR", "data/chest_xray/test"))
 CLASSES = ["NORMAL", "PNEUMONIA"]
-THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))       # Entscheidungsschwelle für PNEUMONIA
+# Auf dem inneren Selektions-Split DIESES Modells gesucht (0.3115), nicht
+# geraten und nicht auf den Auswertungsdaten optimiert. Eine Schwelle aus
+# einem anderen Lauf waere fuer dieses Modell bedeutungslos.
+THRESHOLD = float(os.getenv("THRESHOLD", "0.3115"))
 SAMPLES_PER_CLASS = int(os.getenv("SAMPLES_PER_CLASS", "4"))
 
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))         # max. Analysen pro Fenster

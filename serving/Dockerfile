@@ -25,7 +25,7 @@ COPY serving/data.py serving/main.py serving/stages.py ./
 # die Form von fc.weight und bricht bei Widerspruch ab, statt mit der falschen
 # Vorverarbeitung zu rechnen. Wer hier die Datei tauscht, muss MODEL_FAMILY
 # mittauschen.
-COPY checkpoints/rsna_f4_s0.pth ./checkpoints/
+COPY checkpoints/rsna_f4_s0_bal10.pth ./checkpoints/
 COPY serving/samples ./samples
 
 # Segmenter für die Masken-/Crop-Kachel der Pipeline-Ansicht.
@@ -37,7 +37,7 @@ COPY checkpoints/unet_best.pth ./checkpoints/
 
 # Strecke und Gewicht. Beides zusammen, weil beides zusammen stimmen muss.
 ENV MODEL_FAMILY=rsna
-ENV CHECKPOINT_PATH=checkpoints/rsna_f4_s0.pth
+ENV CHECKPOINT_PATH=checkpoints/rsna_f4_s0_bal10.pth
 
 # In Produktion die kleinen Beispielbilder statt des großen Datensatzes nutzen
 ENV TEST_DIR=samples
