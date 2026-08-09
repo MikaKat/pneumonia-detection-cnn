@@ -1,0 +1,93 @@
+{
+  "erzeugt_von": "rsna/befunde/rsna_demobilder.py",
+  "regel": "erklaerungen/31_webapp_karten_und_skala.md, Abschnitt 4",
+  "quelle": "predictions_holdout/holdout.csv",
+  "quelle_sha256_16": "f4d2f89f120e6b62",
+  "auswahl": "je Klasse x Aufnahmeart das Bild am Median der Ensemble-Wahrscheinlichkeit, Gleichstand nach patientId",
+  "bilder": [
+    {
+      "id": "normal_ap",
+      "file": "normal_ap.png",
+      "label": "Normal, AP",
+      "category": "normal",
+      "category_label": "Normal",
+      "viewpos": "AP",
+      "rsna_class": "Normal",
+      "y": 0,
+      "p_ens_holdout": 0.0504,
+      "patientId": "eabe39ed-472d-4eb2-a037-435abcaf2373",
+      "zelle_n": 256,
+      "zelle_median": 0.0504
+    },
+    {
+      "id": "normal_pa",
+      "file": "normal_pa.png",
+      "label": "Normal, PA",
+      "category": "normal",
+      "category_label": "Normal",
+      "viewpos": "PA",
+      "rsna_class": "Normal",
+      "y": 0,
+      "p_ens_holdout": 0.0291,
+      "patientId": "fec6554c-a84f-4d37-a05b-3838bbdd914d",
+      "zelle_n": 1073,
+      "zelle_median": 0.0291
+    },
+    {
+      "id": "not_normal_ap",
+      "file": "not_normal_ap.png",
+      "label": "Abnormal, no lung opacity, AP",
+      "category": "not_normal",
+      "category_label": "Abnormal, no lung opacity",
+      "viewpos": "AP",
+      "rsna_class": "No Lung Opacity / Not Normal",
+      "y": 0,
+      "p_ens_holdout": 0.2102,
+      "patientId": "6c34c206-a046-456b-b46c-345e4dfca403",
+      "zelle_n": 817,
+      "zelle_median": 0.2102
+    },
+    {
+      "id": "not_normal_pa",
+      "file": "not_normal_pa.png",
+      "label": "Abnormal, no lung opacity, PA",
+      "category": "not_normal",
+      "category_label": "Abnormal, no lung opacity",
+      "viewpos": "PA",
+      "rsna_class": "No Lung Opacity / Not Normal",
+      "y": 0,
+      "p_ens_holdout": 0.1413,
+      "patientId": "78440075-3cf6-4504-8c4d-e4987839a192",
+      "zelle_n": 808,
+      "zelle_median": 0.1415
+    },
+    {
+      "id": "opacity_ap",
+      "file": "opacity_ap.png",
+      "label": "Lung opacity (pneumonia), AP",
+      "category": "opacity",
+      "category_label": "Lung opacity (pneumonia)",
+      "viewpos": "AP",
+      "rsna_class": "Lung Opacity",
+      "y": 1,
+      "p_ens_holdout": 0.4858,
+      "patientId": "49300dbc-f609-4c80-be6c-808222542479",
+      "zelle_n": 666,
+      "zelle_median": 0.4856
+    },
+    {
+      "id": "opacity_pa",
+      "file": "opacity_pa.png",
+      "label": "Lung opacity (pneumonia), PA",
+      "category": "opacity",
+      "category_label": "Lung opacity (pneumonia)",
+      "viewpos": "PA",
+      "rsna_class": "Lung Opacity",
+      "y": 1,
+      "p_ens_holdout": 0.4623,
+      "patientId": "349c35ba-a32c-4cef-bfe9-613da6d7054d",
+      "zelle_n": 192,
+      "zelle_median": 0.461
+    }
+  ]
+}

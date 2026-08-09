@@ -8,13 +8,32 @@ import { useState } from "react";
 // negative did have pneumonia (NPV 0.500, README section 6). A green "no signs
 // of pneumonia" box would be the one statement the measurements contradict.
 //
-// What is shown instead: the probability, the range it moves through when the
-// framing is nudged by a couple of percent, and what that does and does not mean.
+// What is shown instead: the probability, where it sits on a scale whose
+// meaning is stated, the range it moves through when the framing is nudged by a
+// couple of percent, and what all of that does and does not mean.
 //
 // Since phase 10 the number is the mean of five separately calibrated models,
 // so there is a second spread to report: how far those five disagree with each
 // other on this image. It is a different question from the framing spread and
 // it is shown next to it rather than folded into it.
+//
+// TWO CHANGES OF 09.08.2026, both from reading the finished page:
+//
+// 1. THE SCALE HAS MARKS NOW. A bare 0-to-100 bar is read against the felt
+//    middle at 50 %, and that middle is wrong here. The operating point is
+//    0.2003, and on 3812 held-out images the highest value ever produced was
+//    0.8927 with only 9 % above 0.60. So 45 % is well ABOVE the point where
+//    this model would call an image positive, and it used to look like "rather
+//    not". Two marks fix that: the threshold as a line in the track, and one
+//    sentence placing the value among the 22872 development images.
+//
+// 2. THE LOCALISATION HEAD IS THE FIRST MAP, NOT THE THIRD. Measured against
+//    the radiologist boxes the head field reaches 0.9123, Grad-CAM 0.7312, and
+//    a fixed template that never looks at the image 0.7520 (phase 5). The
+//    weaker of the two maps had the big frame and the slider; the stronger one
+//    sat below as a still picture. Now they share one frame with a switch, and
+//    the head is preselected. Grad-CAM stays reachable because it is the only
+//    map that comes from the number above.
 //
 // The numbers quoted in the honesty block are from the held-out set of 3812
 // images, read once: `predictions_holdout/holdout.csv`, evaluated by
@@ -23,6 +42,10 @@ import { useState } from "react";
 export function ResultView({ result, stages = [], originalUrl, onReset }) {
   const [opacity, setOpacity] = useState(0.6);
   const [showViews, setShowViews] = useState(false);
+  // "head" or "cam". The head is preselected: it is the better pointer by a
+  // wide margin, and preselection is the part of a switch that most users
+  // never change.
+  const [map, setMap] = useState("head");
 
   const u = result.uncertainty;
   const ens = result.ensemble?.per_fold?.length ? result.ensemble : null;
@@ -31,17 +54,26 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
   const lo = u?.min ?? base;
   const hi = u?.max ?? base;
   const spread = u?.spread ?? 0;
+  const threshold = result.threshold;
+  const reference = result.reference;
 
   const pct = (x) => Math.round(x * 100);
   // Where the score sits matters less than how far it travels. Ten points of
   // movement from a 2 % change in framing means the digits are not meaningful.
   const unstable = spread >= 0.1;
 
-  const heatmapSrc = result.heatmap_png_base64
+  const camSrc = result.heatmap_png_base64
     ? `data:image/png;base64,${result.heatmap_png_base64}`
     : null;
+  // The transparent layer, not the version already composited onto the X-ray:
+  // fading a composite over the same picture would be a second pass of the same
+  // blend. Where the head says nothing this layer is transparent, so the X-ray
+  // underneath stays untouched.
+  const headSrc = result.head_field_layer_png_base64
+    ? `data:image/png;base64,${result.head_field_layer_png_base64}`
+    : null;
 
-  // The heatmap is rendered in the model's 224x224 geometry, where the image is
+  // Both maps are rendered in the model's 224x224 geometry, where the image is
   // squeezed to a square. The layer underneath has to be the same picture in the
   // same geometry, otherwise the warm areas sit next to the anatomy they belong
   // to. The upload stage image is used for it (full resolution, same framing);
@@ -50,6 +82,9 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
   const baseSrc = uploadStage
     ? `data:image/png;base64,${uploadStage.image_png_base64}`
     : originalUrl;
+
+  const overlaySrc = map === "head" ? headSrc : camSrc;
+  const bothMaps = Boolean(headSrc && camSrc);
 
   return (
     <section className="card result">
@@ -60,19 +95,43 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
         </div>
 
         {/* The band is the point of this display: a single tick would claim a
-            precision the model does not have. */}
+            precision the model does not have. The dashed line is the operating
+            point, which is what makes the rest of the bar readable. */}
         <div className="score-track" aria-hidden="true">
           <div
             className="score-band"
             style={{ left: `${pct(lo)}%`, width: `${Math.max(pct(hi) - pct(lo), 1)}%` }}
           />
           <div className="score-mark" style={{ left: `${pct(median)}%` }} />
+          {typeof threshold === "number" && (
+            <div className="score-threshold" style={{ left: `${pct(threshold)}%` }} />
+          )}
         </div>
         <div className="score-scale" aria-hidden="true">
           <span>0%</span>
           <span>50%</span>
           <span>100%</span>
         </div>
+
+        {typeof threshold === "number" && (
+          <p className="score-anchor">
+            The dashed line sits at <strong>{pct(threshold)}%</strong>, this model's
+            operating point. It was fixed on 22872 development images before the
+            held-out set was ever touched.{" "}
+            {reference?.percentile != null && (
+              <>
+                This score is higher than{" "}
+                <strong>{reference.percentile}%</strong> of those{" "}
+                {reference.n.toLocaleString("en-US").replace(/,/g, " ")} images.{" "}
+              </>
+            )}
+            The probabilities are calibrated to a population where about 22 in 100
+            images show pneumonia, so they run low by design: on 3812 held-out images
+            the highest score ever produced was 89%, and only 9% of images scored
+            above 60%. <strong>The line is a mark on a scale, not a verdict</strong> —
+            see below for why none is shown.
+          </p>
+        )}
 
         <p className="score-range">
           {u ? (
@@ -99,7 +158,8 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
             image they range from {pct(Math.min(...ens.per_fold))}% to{" "}
             {pct(Math.max(...ens.per_fold))}%. That is disagreement between models,
             which is a different thing from the framing spread above: five models can
-            agree with each other and still be wrong together.
+            agree with each other and still be wrong together. Averaging also pulls the
+            extremes in, which is part of why no score here reaches 95%.
           </p>
         )}
 
@@ -129,22 +189,45 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
       </div>
 
       <div className="heatmap-area">
+        {bothMaps && (
+          <div className="map-switch" role="tablist" aria-label="Which map to show">
+            <button
+              role="tab"
+              aria-selected={map === "head"}
+              className={"map-tab" + (map === "head" ? " map-tab--active" : "")}
+              onClick={() => setMap("head")}
+            >
+              Where the model points
+              <span className="map-tab-sub">localisation head &middot; 0.91</span>
+            </button>
+            <button
+              role="tab"
+              aria-selected={map === "cam"}
+              className={"map-tab" + (map === "cam" ? " map-tab--active" : "")}
+              onClick={() => setMap("cam")}
+            >
+              What the score came from
+              <span className="map-tab-sub">Grad-CAM &middot; 0.73</span>
+            </button>
+          </div>
+        )}
+
         <div className="heatmap-stack">
           {baseSrc && <img className="heatmap-base" src={baseSrc} alt="Original X-ray" />}
-          {heatmapSrc && (
+          {overlaySrc && (
             <img
               className="heatmap-overlay"
-              src={heatmapSrc}
-              alt="Grad-CAM heatmap"
+              src={overlaySrc}
+              alt={map === "head" ? "Localisation field of the ensemble" : "Grad-CAM heatmap"}
               style={{ opacity }}
             />
           )}
-          {!heatmapSrc && <p className="muted">No heatmap returned for this image.</p>}
+          {!overlaySrc && <p className="muted">No map returned for this image.</p>}
         </div>
 
-        {heatmapSrc && (
+        {overlaySrc && (
           <label className="slider">
-            <span>Heatmap intensity</span>
+            <span>Overlay intensity</span>
             <input
               type="range"
               min="0"
@@ -155,15 +238,40 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
             />
           </label>
         )}
-        <p className="muted heatmap-caption">
-          Warmer areas show where the model looked most (Grad-CAM). Expect a diffuse blob
-          rather than a sharp finding: measurements in this project showed that the evidence
-          the model uses is spread out and partly outside the lungs. Read it as a
-          plausibility check on the model, not as a marked lesion.
-        </p>
+
+        {/* One caption per map, not one caption for both. The two maps are
+            measured against the same yardstick and land far apart, and a shared
+            caption would have to blur that to stay true of either. */}
+        {map === "head" ? (
+          <p className="muted heatmap-caption">
+            The <strong>second output of the same network</strong>, a 14x14 field trained
+            against radiologist boxes and averaged over the five models. Against those
+            boxes it reaches <strong>0.91</strong>, where Grad-CAM reaches 0.73 and a
+            fixed template that never looks at the image reaches 0.75. It is the better
+            pointer, and it does <strong>not</strong> feed the score.
+            <br />
+            Drawn with no box and no cut-off on purpose: the level of this field is not
+            calibrated, and on images without pneumonia it still lights up in 62% of
+            cases. Where it says nothing it is transparent and the X-ray shows through,
+            which is the difference between "no statement" and "statement: no". Read it
+            as a hint about the region, never as a finding.
+          </p>
+        ) : (
+          <p className="muted heatmap-caption">
+            Where the last convolutional block contributed most to the score, averaged
+            over the five models. This is the <strong>only map tied to the number
+            above</strong>, which is why it is kept.
+            <br />
+            As a pointer it is weak: <strong>0.73</strong> against the radiologist boxes,
+            below the 0.75 of a fixed template that ignores the image entirely. Expect a
+            diffuse blob rather than a sharp finding — measurements in this project
+            showed the evidence the model uses is spread out and partly outside the
+            lungs. Read it as a plausibility check on the model, not as a marked lesion.
+          </p>
+        )}
       </div>
 
-      {/* Last block in the card, under the score and the heatmap, so it is the
+      {/* Last block in the card, under the score and the maps, so it is the
           note the reader leaves with. */}
       <div className="honesty">
         <p>

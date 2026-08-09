@@ -32,6 +32,7 @@ Kernideen:
 """
 
 import base64
+import bisect
 import io
 import json
 import os
@@ -121,9 +122,29 @@ if MODEL_FAMILY != "rsna":
     )
 
 INPUT_SIZE = int(os.getenv("INPUT_SIZE", "224"))       # rsna_train.py --size, Vorgabe 224
-TEST_DIR = _resolve(os.getenv("TEST_DIR", "data/chest_xray/test"))
-CLASSES = ["NORMAL", "PNEUMONIA"]
-SAMPLES_PER_CLASS = int(os.getenv("SAMPLES_PER_CLASS", "4"))
+
+# Die Beispielbilder stehen seit dem 09.08.2026 in einer Manifest-Datei und
+# nicht mehr in zwei Ordnern namens NORMAL und PNEUMONIA. Zwei Gruende:
+#   * RSNA hat DREI Klassen, und die groesste davon ist die Mittelklasse, in der
+#     96,5 Prozent der falsch Positiven sitzen. Eine Ordnerstruktur mit zwei
+#     Namen kann sie nicht abbilden.
+#   * Die Auswahl folgt einer vorher aufgeschriebenen Regel
+#     (erklaerungen/31_webapp_karten_und_skala.md, Abschnitt 4). Das Manifest
+#     haelt fest, welches Bild aus welcher Zelle stammt; ein Ordnername haelt
+#     nichts fest.
+SAMPLES_DIR = _resolve(os.getenv("SAMPLES_DIR", "samples"))
+
+# TEST_DIR zeigte auf den Kermany-Testordner und ist mit den neuen Demobildern
+# gegenstandslos. Es wird gelesen, um einen alten Wert LAUT abzulehnen: eine
+# Variable, die auf einen Ordner mit Bildern zeigt und stillschweigend ignoriert
+# wird, ist genau die Sorte Fehler, die am 09.08.2026 schon einmal eine falsche
+# Schwelle ausgeliefert hat.
+if os.getenv("TEST_DIR") is not None:
+    raise RuntimeError(
+        "TEST_DIR ist gesetzt. Die Beispielbilder kommen seit dem 09.08.2026 "
+        f"aus {SAMPLES_DIR}/manifest.json; bitte SAMPLES_DIR setzen und "
+        "TEST_DIR entfernen."
+    )
 
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))         # max. Analysen pro Fenster
 RATE_WINDOW = int(os.getenv("RATE_WINDOW", "3600"))     # Fensterlänge in Sekunden
@@ -253,6 +274,62 @@ def platt_apply(p: np.ndarray, a: float, b: float) -> np.ndarray:
     die Auswertung. Der Rauchtest prueft genau das nach.
     """
     return 1.0 / (1.0 + np.exp(-(a * _logit(p) + b)))
+
+# --------------------------------------------------------------------------
+# Die Referenzverteilung der Entwicklungsdaten
+# --------------------------------------------------------------------------
+# Wozu sie da ist: die App zeigt eine kalibrierte Wahrscheinlichkeit auf einem
+# Balken von 0 bis 100 Prozent, und ohne Bezugsgroesse liest man sie gegen die
+# gefuehlte Mitte bei 50 Prozent. Die ist hier falsch. Der Arbeitspunkt liegt
+# bei 0,2003, und der hoechste je gemessene Wert bei 0,8927. Mika hat genau das
+# bemerkt ("nie hoeher als 60 Prozent"), und die Antwort ist keine Aenderung am
+# Modell, sondern eine Bezugsgroesse an der Skala.
+#
+# Woraus: die 22872 kalibrierten Out-of-fold-Vorhersagen der
+# Entwicklungsbilder, also dieselbe Menge, aus der Kurven und Schwelle stammen.
+# NICHT aus dem Holdout: der ist als Messgroesse verbraucht, und eine Zahl aus
+# ihm dauerhaft anzuzeigen hiesse, ihn zur staendigen Referenz zu machen.
+#
+# Erzeugt von rsna/befunde/rsna_referenz_dev.py. Fehlt die Datei, laeuft alles
+# weiter und der einordnende Satz entfaellt; er ist eine Lesehilfe und kein Teil
+# der Rechnung.
+REFERENCE_PATH = _resolve(os.getenv("REFERENCE_PATH", "model/referenz_dev.json"))
+REFERENCE: dict | None = None
+if os.path.isfile(REFERENCE_PATH):
+    with open(REFERENCE_PATH, encoding="utf-8") as _fh:
+        _ref = json.load(_fh)
+    # Dieselbe Bindung wie bei der Kalibrierdatei: eine Verteilung aus einem
+    # anderen Arm waere von aussen unsichtbar und wuerde den Wert falsch
+    # einordnen.
+    if _ref.get("arm") != ARM_TAG:
+        raise RuntimeError(
+            f"{REFERENCE_PATH} gehoert zu Arm {_ref.get('arm')!r}, gebraucht "
+            f"wird {ARM_TAG!r}."
+        )
+    _raster = [float(v) for v in _ref["raster"]]
+    if _raster != sorted(_raster):
+        raise RuntimeError(f"das Raster in {REFERENCE_PATH} ist nicht sortiert.")
+    REFERENCE = {"n": int(_ref["n"]), "raster": _raster}
+    print(f"Referenzverteilung: {REFERENCE['n']} Entwicklungsbilder aus "
+          f"{os.path.basename(REFERENCE_PATH)}.")
+else:
+    print(f"Referenzverteilung {REFERENCE_PATH} fehlt - die Einordnung an der "
+          f"Skala entfaellt.")
+
+
+def reference_percentile(p: float) -> float | None:
+    """Anteil der Entwicklungsbilder unter `p`, in Prozent.
+
+    Das Raster hat 1001 Stuetzstellen, also 0,1 Prozent Aufloesung; eine
+    Stuetzstelle deckt rund 23 Bilder ab. `bisect_left` heisst: gezaehlt wird
+    STRENG kleiner, damit der Satz "hoeher als X Prozent" auch woertlich stimmt.
+    """
+    if REFERENCE is None:
+        return None
+    r = REFERENCE["raster"]
+    i = bisect.bisect_left(r, p)
+    return round(100.0 * i / (len(r) - 1), 1)
+
 
 # Der Segmenter ist OPTIONAL. Fehlt checkpoints/unet_best.pth, laeuft die
 # Analyse unveraendert weiter, nur die Lungenfinder-Karte entfaellt. Sie war nie
@@ -485,11 +562,24 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
     # 62 Prozent der Faelle an (Phase 5b). Ein Kasten oder eine Umrandung
     # waere eine Behauptung ueber genau die Groesse, die nachweislich nicht
     # stimmt. Ein Verlauf ist die staerkste Aussage, die die Messung traegt.
+    #
+    # ZWEI Fassungen desselben Feldes, seit dem 09.08.2026:
+    #   `head_b64`       das Feld ueber dem Roentgenbild verrechnet, fuer die
+    #                    kleine Kachel in der Kette.
+    #   `head_layer_b64` dasselbe Feld als durchsichtige Ebene ohne Bild
+    #                    darunter, fuer die grosse Flaeche in der Ergebniskarte,
+    #                    wo ein Regler darueber liegt. Ein bereits verrechnetes
+    #                    Bild ueber demselben Bild einzublenden waere ein
+    #                    zweiter Durchgang derselben Mischung.
+    # Beide entstehen aus GENAU demselben `feld`, also nicht aus zwei
+    # Rechenwegen, die auseinanderlaufen koennen.
     head_b64 = None
+    head_layer_b64 = None
     if emit is not None:
         ts = time.time()
         head_b64 = pipeline_stages.render_head_field(pil_img, feld)
         _emit("head_field", head_b64, ms=_stage_ms(ts))
+    head_layer_b64 = pipeline_stages.render_head_field_layer(feld)
 
     # Ohne Labelfeld, mit Absicht: die Entscheidungsschwelle traegt zwischen
     # Datensaetzen nicht (NPV 0.500 in der externen Pruefung, siehe README
@@ -498,6 +588,16 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
     return {
         "probability": round(prob_pneu, 4),
         "threshold": THRESHOLD,
+        # Die Einordnung gehoert zu der Zahl, die die Oberflaeche GROSS anzeigt,
+        # und das ist der Median ueber die Bildausschnitte, nicht p_views[0].
+        # Beide serverseitig zu rechnen waere billiger zu haben, aber dann
+        # koennte die Oberflaeche die falsche von beiden neben den Balken
+        # schreiben.
+        "reference": (None if REFERENCE is None else {
+            "n": REFERENCE["n"],
+            "percentile": reference_percentile(median),
+            "of": "development images, out-of-fold and calibrated",
+        }),
         "uncertainty": {
             "median": round(median, 4),
             "min": min(vals),
@@ -521,6 +621,7 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
             "values": [[round(float(v), 4) for v in row] for row in feld],
         },
         "head_field_png_base64": head_b64,
+        "head_field_layer_png_base64": head_layer_b64,
         "heatmap_png_base64": heatmap_b64,
         "inference_ms": int((time.time() - t0) * 1000),
     }
@@ -530,27 +631,52 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
 # Beispielbilder registrieren (feste Auswahl aus dem Test-Ordner)
 # --------------------------------------------------------------------------
 def _build_sample_registry() -> dict:
+    """Die Demobilder aus `samples/manifest.json` einlesen.
+
+    Das Manifest ist die einzige Quelle: welche Bilder, welche Klasse, welche
+    Aufnahmeart. Es wird von `rsna/befunde/rsna_demobilder.py` geschrieben, und
+    zwar nach einer Regel, die vor dem Ansehen der Bilder feststand (je Klasse
+    mal Aufnahmeart das Bild am Median der Ensemble-Wahrscheinlichkeit).
+
+    Was ABSICHTLICH nicht nach aussen geht: `p_ens_holdout` und `patientId`. Ein
+    vorab bekannter Wert neben einem Demobild machte die Demo zur Behauptung
+    statt zur Rechnung, und die Kennung des Bildes hat in einer oeffentlichen
+    Antwort nichts zu suchen.
+    """
+    pfad = os.path.join(SAMPLES_DIR, "manifest.json")
+    if not os.path.isfile(pfad):
+        # Kein Abbruch: ohne Beispielbilder bleibt der Upload-Weg vollstaendig
+        # nutzbar, und die Oberflaeche zeigt die leere Liste sauber an.
+        print(f"WARNUNG: {pfad} fehlt - keine Beispielbilder.")
+        return {}
+    with open(pfad, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+
     registry = {}
-    for cls in CLASSES:
-        folder = os.path.join(TEST_DIR, cls)
-        if not os.path.isdir(folder):
-            continue
-        files = sorted(f for f in os.listdir(folder) if f.lower().endswith((".png", ".jpg", ".jpeg")))
-        for i, fname in enumerate(files[:SAMPLES_PER_CLASS], start=1):
-            sid = f"{cls.lower()}_{i:02d}"
-            path = os.path.join(folder, fname)
-            # Thumbnail einmalig erzeugen und als PNG-Bytes vorhalten (nur wenige Bilder)
-            img = Image.open(path).convert("RGB")
-            img.thumbnail((160, 160))
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            registry[sid] = {
-                "id": sid,
-                "label": f"{cls.title()} X-ray #{i}",
-                "category": cls,
-                "path": path,
-                "thumb_png": buf.getvalue(),
-            }
+    for eintrag in manifest["bilder"]:
+        bildpfad = os.path.join(SAMPLES_DIR, eintrag["file"])
+        if not os.path.isfile(bildpfad):
+            # Laut, nicht still: ein Manifest, das ein fehlendes Bild nennt,
+            # ist der Fall aus fehler_gitignore_vs_dockerfile_copy - die Datei
+            # war per Muster aus dem Abbild ausgesperrt und nichts hat es
+            # gemeldet.
+            raise RuntimeError(
+                f"{bildpfad} fehlt, steht aber in {pfad}. Pruefen, ob die "
+                f"Datei per .gitignore oder .dockerignore ausgesperrt ist."
+            )
+        img = Image.open(bildpfad).convert("RGB")
+        img.thumbnail((160, 160))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        registry[eintrag["id"]] = {
+            "id": eintrag["id"],
+            "label": eintrag["label"],
+            "category": eintrag["category"],
+            "category_label": eintrag["category_label"],
+            "viewpos": eintrag["viewpos"],
+            "path": bildpfad,
+            "thumb_png": buf.getvalue(),
+        }
     return registry
 
 
@@ -722,6 +848,8 @@ def get_samples():
                 "id": s["id"],
                 "label": s["label"],
                 "category": s["category"],
+                "category_label": s["category_label"],
+                "viewpos": s["viewpos"],
                 "thumbnail_url": f"/api/samples/{s['id']}/thumb",
             }
             for s in SAMPLES.values()

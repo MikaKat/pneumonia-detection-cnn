@@ -103,7 +103,11 @@ PIPELINE = [
         "status": "active",
         "note": "One map per fold would explain a model that did not produce the "
                 "number shown. Each map is already stretched to 0-1 by Grad-CAM, so "
-                "the average is the share of the five models that find a place warm.",
+                "the average is the share of the five models that find a place warm. "
+                "As a pointer this map is weak: measured against the radiologist "
+                "boxes it reaches 0.73, below the 0.75 of a fixed template that "
+                "ignores the image and marks where pneumonia usually sits. It is "
+                "kept because it is the only map that comes from the score itself.",
     },
 ]
 
@@ -136,7 +140,10 @@ ASIDES = [
         "status": "active",
         "group": "aside",
         "note": "This comes out of the very network that produced the score, but it "
-                "does not feed the score. It is drawn as a gradient with no box and "
+                "does not feed the score. It is the stronger of the two maps by a "
+                "wide margin: 0.91 against the radiologist boxes, where Grad-CAM "
+                "reaches 0.73 and a fixed anatomical template reaches 0.75. It is "
+                "drawn as a gradient with no box and "
                 "no cut-off, on purpose: the level of this field is not calibrated. "
                 "On images without pneumonia it still lights up in 62 % of cases, so "
                 "a drawn box would be a claim about exactly the quantity that was "
@@ -443,6 +450,41 @@ def render_head_field(pil_img: Image.Image, field: np.ndarray) -> str:
     alpha = (0.75 * f)[..., None]
     out = (1.0 - alpha) * rgb + alpha * colour
     return _png_b64(np.clip(out, 0, 255).astype(np.uint8))
+
+
+def render_head_field_layer(field: np.ndarray) -> str:
+    """Dasselbe Kopffeld als DURCHSICHTIGE Ebene, ohne Roentgenbild darunter.
+
+    Warum eine zweite Fassung und nicht nur die verrechnete: in der
+    Ergebniskarte liegt ueber dem Bild ein Regler, und ein bereits verrechnetes
+    Bild ueber demselben Bild einzublenden waere ein zweiter Durchgang derselben
+    Mischung. Der Browser soll genau einmal mischen, mit genau dem Alpha, das
+    hier steht.
+
+    Die drei Entscheidungen aus `render_head_field` gelten unveraendert weiter,
+    und sie sind hier sogar der ganze Inhalt der Datei: KEINE Schwelle, KEINE
+    Streckung je Bild, DECKKRAFT PROPORTIONAL ZUM WERT. Wo der Kopf nichts sagt,
+    ist die Ebene durchsichtig, und das Roentgenbild darunter bleibt
+    unangetastet sichtbar. Genau das ist der bildliche Unterschied zwischen
+    "keine Aussage" und "Aussage: nein".
+
+    Der Regler in der Oberflaeche multipliziert dieses Alpha; bei Vollausschlag
+    liegt es also bei 0,75 an der staerksten Stelle und nirgends darueber.
+    """
+    f = cv2.resize(field.astype(np.float32), (224, 224), interpolation=cv2.INTER_LINEAR)
+    f = np.clip(f, 0.0, 1.0)
+
+    colour = cv2.applyColorMap((f * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+    colour = cv2.cvtColor(colour, cv2.COLOR_BGR2RGB)
+
+    alpha = (0.75 * f * 255).astype(np.uint8)
+    rgba = np.dstack([colour, alpha])
+    # Ueber PIL im RGBA-Modus, nicht ueber _png_b64: das dortige
+    # Image.fromarray traefe zwar auch RGBA, aber _fit skaliert bilinear, und
+    # 224 Pixel sind ohnehin unter VIEW_SIZE. Der direkte Weg spart die Frage.
+    buf = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def render_model_input(tensor: torch.Tensor) -> str:

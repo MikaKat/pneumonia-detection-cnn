@@ -53,7 +53,9 @@ COPY checkpoints/unet_best.pth ./checkpoints/
 # Umgebungsvariablen.
 
 # In Produktion die kleinen Beispielbilder statt des großen Datensatzes nutzen
-ENV TEST_DIR=samples
+# Die Demobilder kommen aus samples/manifest.json, nicht mehr aus zwei Ordnern
+# namens NORMAL und PNEUMONIA. Ein gesetztes TEST_DIR bricht in main.py ab.
+ENV SAMPLES_DIR=samples
 # KEIN ENV THRESHOLD hier. Bis zum 09.08.2026 stand an dieser Stelle 0.5 und
 # hat die 0.3115 aus main.py still ueberschrieben: im Protokoll stand eine
 # Schwelle, im Container lief eine andere, und nichts in der Ausgabe hat

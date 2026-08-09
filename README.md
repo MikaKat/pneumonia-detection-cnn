@@ -384,6 +384,11 @@ somewhere in 62 percent of cases. Scored as a detection task it reaches 0.136
 against 0.025 for the location prior, and almost half the loss is false alarms.
 Full numbers in [`archiv/03_zweiter_kopf`](archiv/03_zweiter_kopf/).
 
+The application shows this map first and Grad-CAM second, behind a switch, with
+the score each one reaches printed on the switch. The order follows the table
+above and it used to be the other way round: the map in the large frame was the
+one that loses to a fixed template.
+
 ### The threshold in practice, and why no label is shown
 
 At the pre-registered threshold of 0.2003:
@@ -399,6 +404,16 @@ Setting it per projection closes most of the gap and **cannot be deployed**: the
 application receives an uploaded PNG with no DICOM header and never learns the
 projection. That is the honest reason it reports a probability with its spread
 and never a yes or no.
+
+The scale it prints them on carries two marks, and they are there because a bare
+bar from 0 to 100 percent is read against a felt middle at 50 percent. That
+middle is wrong here. The operating point is 0.2003, the highest score this
+ensemble produced anywhere on the held-out set was 0.8927, and only 9 percent of
+images scored above 0.60, so a 45 percent sits well above the point where the
+model would call an image positive while looking like "rather not". The
+threshold is therefore drawn as a dashed line in the bar, and the score is
+placed against the distribution of the 22,872 development images. Both are marks
+on a scale. Neither is a label.
 
 ---
 

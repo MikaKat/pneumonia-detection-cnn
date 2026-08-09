@@ -262,6 +262,9 @@ def _app():
         # in der die Variable aus alten Zeiten noch steht, soll der Test die
         # App pruefen und nicht die Shell.
         os.environ.pop("THRESHOLD", None)
+        # Dasselbe fuer TEST_DIR: es zeigte bis zum 09.08.2026 auf den
+        # Kermany-Testordner und bricht seitdem ebenfalls absichtlich ab.
+        os.environ.pop("TEST_DIR", None)
         _APP = _lade("serving_main", SERVING / "main.py")
     return _APP
 
@@ -288,3 +291,104 @@ def test_platt_gleich_wie_im_holdout():
     for a, b in ((0.5809428850556021, -1.0344684452790784),
                  (0.8283144233238171, -1.4498154833747867)):
         assert np.allclose(main.platt_apply(p, a, b), platt(p, a, b), atol=0, rtol=0)
+
+
+# --------------------------------------------------------------------------
+# Die drei Zusaetze vom 09.08.2026
+# --------------------------------------------------------------------------
+# Sie pruefen nicht das Modell, sondern drei Entscheidungen, die still brechen
+# koennen: eine Auswahl, die nicht mehr zu ihrer Quelle passt, eine
+# Referenzverteilung, die nicht mehr sortiert ist, und eine Karte, die anfaengt,
+# jedes Bild auf sein eigenes Maximum zu strecken.
+
+MANIFEST = SERVING / "samples" / "manifest.json"
+REFERENZ = SERVING / "model" / "referenz_dev.json"
+
+
+def test_demobilder_passen_zu_ihrer_quelle():
+    """Jedes Demobild liegt da, ist eindeutig, und stammt aus dem Holdout.
+
+    Der Punkt ist die letzte Pruefung: das Manifest nennt zu jedem Bild die
+    Wahrscheinlichkeit, mit der es ausgewaehlt wurde. Weicht sie von der Zeile
+    in `holdout.csv` ab, ist das Manifest aus einer anderen Quelle geschrieben
+    worden als der, die im Kopf der Datei steht, und die Auswahlregel waere
+    nicht mehr nachvollziehbar.
+    """
+    if not MANIFEST.is_file():
+        pytest.skip(f"{MANIFEST} fehlt")
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    bilder = manifest["bilder"]
+
+    ids = [b["id"] for b in bilder]
+    assert len(ids) == len(set(ids)), f"doppelte Kennung: {ids}"
+    for b in bilder:
+        assert (MANIFEST.parent / b["file"]).is_file(), f"{b['file']} fehlt"
+        # Klasse und Trainingslabel muessen zueinander passen, sonst zeigt die
+        # Oberflaeche eine Wahrheit an, die nicht die gemessene ist.
+        assert (b["rsna_class"] == "Lung Opacity") == (b["y"] == 1), b["id"]
+
+    zellen = {(b["category"], b["viewpos"]) for b in bilder}
+    assert len(zellen) == len(bilder) == 6, f"erwartet 6 Zellen, sind {zellen}"
+
+    if not HOLDOUT_CSV.is_file():
+        pytest.skip(f"{HOLDOUT_CSV} fehlt")
+    import csv
+
+    with open(HOLDOUT_CSV, encoding="utf-8") as fh:
+        p_ens = {z["patientId"]: float(z["p_ens"]) for z in csv.DictReader(fh)}
+    for b in bilder:
+        assert b["patientId"] in p_ens, f"{b['id']} steht nicht im Holdout"
+        assert abs(p_ens[b["patientId"]] - b["p_ens_holdout"]) < 5e-5, (
+            f"{b['id']}: Manifest sagt {b['p_ens_holdout']}, holdout.csv sagt "
+            f"{p_ens[b['patientId']]:.4f}")
+
+
+def test_referenzverteilung_ist_brauchbar():
+    """Sortiert, vollstaendig, und die Einordnung waechst monoton."""
+    if not REFERENZ.is_file():
+        pytest.skip(f"{REFERENZ} fehlt")
+    ref = json.loads(REFERENZ.read_text(encoding="utf-8"))
+    raster = ref["raster"]
+    assert ref["n"] == 22872, ref["n"]
+    assert raster == sorted(raster), "das Raster ist nicht sortiert"
+    assert 0.0 <= raster[0] and raster[-1] <= 1.0
+
+    main = _app()
+    # Monoton, und die Schwelle muss im mittleren Bereich landen. Laege sie bei
+    # 1 oder bei 99 Prozent, waere die Verteilung nicht die des ausgelieferten
+    # Arms, und der Satz in der Oberflaeche waere irrefuehrend statt falsch -
+    # also genau die Sorte Fehler, die niemand bemerkt.
+    werte = [main.reference_percentile(x) for x in (0.0, 0.05, 0.2003, 0.5, 0.9, 1.0)]
+    assert werte == sorted(werte), werte
+    assert 40.0 < main.reference_percentile(float(main.THRESHOLD)) < 80.0
+
+
+def test_kopffeld_ebene_wird_nicht_je_bild_gestreckt():
+    """Ein Feld ohne Ausschlag muss unsichtbar sein.
+
+    Das ist die eine Eigenschaft der Karte, die man beim Aufhuebschen verliert,
+    ohne es zu merken: streckt man jedes Bild auf sein eigenes Maximum, sieht
+    ein Feld, das nichts sagt, genauso deutlich aus wie ein starkes. Der Pegel
+    des Kopfes ist unkalibriert (62 Prozent Alarm auf gesunden Bildern, Phase
+    5b), also ist genau diese Streckung die Aussage, die die Messung nicht
+    traegt.
+    """
+    stages = _lade("serving_stages", SERVING / "stages.py")
+    from PIL import Image
+    import base64
+    import io
+
+    def alpha(feld):
+        roh = base64.b64decode(stages.render_head_field_layer(feld))
+        bild = Image.open(io.BytesIO(roh))
+        assert bild.mode == "RGBA", bild.mode
+        return np.asarray(bild)[..., 3]
+
+    leer = alpha(np.zeros((14, 14), dtype=np.float32))
+    assert leer.max() == 0, f"ein leeres Feld ist sichtbar (Alpha bis {leer.max()})"
+
+    schwach = alpha(np.full((14, 14), 0.02, dtype=np.float32))
+    assert schwach.max() <= 5, f"ein schwaches Feld leuchtet (Alpha {schwach.max()})"
+
+    voll = alpha(np.ones((14, 14), dtype=np.float32))
+    assert voll.min() == voll.max() == int(0.75 * 255), voll.max()

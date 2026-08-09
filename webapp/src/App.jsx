@@ -14,7 +14,6 @@ import { ImageSource } from "./components/ImageSource.jsx";
 import { QueueStatus } from "./components/QueueStatus.jsx";
 import { PipelineView } from "./components/PipelineView.jsx";
 import { LungFinder } from "./components/LungFinder.jsx";
-import { HeadField } from "./components/HeadField.jsx";
 import { ResultView } from "./components/ResultView.jsx";
 
 export default function App() {
@@ -234,12 +233,16 @@ export default function App() {
 
         {/* Above the score, below the chain. It is a side result, so it does not
             interrupt the scored path; it renders nothing when no segmenter is
-            available. */}
+            available.
+
+            The head field used to sit here too, in a card of its own. It moved
+            into the result card on 09.08.2026 and took the big frame there: it
+            is the better of the two maps by a wide margin (0.91 against the
+            radiologist boxes, Grad-CAM 0.73), and it was the one shown small and
+            motionless. The small tile in the chain above is still drawn, so the
+            side branch does not lose a step. */}
         {(phase === "done" || phase === "running") && (
-          <>
-            <HeadField plan={asidePlan} stages={stages} result={result} />
-            <LungFinder plan={asidePlan} stages={stages} />
-          </>
+          <LungFinder plan={asidePlan} stages={stages} />
         )}
 
         {phase === "done" && result && (

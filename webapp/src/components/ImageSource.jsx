@@ -117,7 +117,18 @@ export function ImageSource({ samples, samplesError, selection, onSelect, disabl
                   ) : (
                     <div className="sample-placeholder">{s.label}</div>
                   )}
-                  {s.category && <span className={`tag tag--${s.category.toLowerCase()}`}>{s.category}</span>}
+                  {/* Three classes, not two. RSNA's middle class ("abnormal, no
+                      lung opacity") is the largest of the three and holds 96.5 %
+                      of this classifier's false positives, so a picker that only
+                      knew NORMAL and PNEUMONIA hid the exact case the model gets
+                      wrong. `category_label` is the readable name; `category` is
+                      the key the colour hangs on. */}
+                  {s.category && (
+                    <span className={`tag tag--${s.category}`}>
+                      {s.category_label || s.category}
+                      {s.viewpos ? ` · ${s.viewpos}` : ""}
+                    </span>
+                  )}
                 </button>
               );
             })}

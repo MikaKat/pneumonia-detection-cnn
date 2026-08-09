@@ -364,9 +364,20 @@ figcaption,
      without putting an opaque plate over the image */
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
 }
+/* Drei Klassen, nicht zwei. Die Mittelklasse bekommt eine eigene Farbe und
+   ausdruecklich keinen Mischton aus Gruen und Rot: sie ist keine Zwischenstufe
+   zwischen gesund und krank, sondern "auffaellig, aber keine Verschattung". */
 .tag--normal {
   background: rgba(53, 179, 126, 0.92);
 }
+.tag--not_normal {
+  background: rgba(197, 148, 54, 0.94);
+}
+.tag--opacity {
+  background: rgba(224, 87, 75, 0.92);
+}
+/* Der alte Schluessel aus der Zeit der zwei Ordner. Steht hier, damit ein
+   Abbild mit altem Manifest nicht ohne Farbe dasteht. */
 .tag--pneumonia {
   background: rgba(224, 87, 75, 0.92);
 }
@@ -535,6 +546,32 @@ figcaption,
   background: var(--primary);
   border-radius: 2px;
 }
+/* Der Arbeitspunkt, gestrichelt und in einer anderen Farbe als der Wert selbst.
+   Er ragt oben und unten ueber die Bahn hinaus, damit er nicht als Teil des
+   Bandes gelesen wird: das Band ist eine Streuung, die Linie ist eine feste
+   Marke. Gestrichelt, weil eine durchgezogene Linie in einem Balken wie eine
+   Grenze zwischen zwei Zustaenden aussieht, und genau die zeigt diese Seite
+   bewusst nicht an. */
+.score-threshold {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 0;
+  transform: translateX(-50%);
+  border-left: 2px dashed var(--muted);
+  opacity: 0.85;
+  pointer-events: none;
+}
+.score-anchor {
+  margin: 10px 0 8px;
+  padding: 10px 12px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
 .score-scale {
   display: flex;
   justify-content: space-between;
@@ -586,6 +623,60 @@ figcaption,
 
 .heatmap-area {
   margin-top: 16px;
+}
+/* Zwei Schaltflaechen in einer Bahn, nicht zwei lose Knoepfe: die beiden Karten
+   zeigen dieselbe Flaeche, und der Umschalter soll aussehen wie eine Wahl
+   zwischen zwei Ansichten und nicht wie zwei Befehle. Die Zahl in der zweiten
+   Zeile ist die Punkt-AUC gegen die Radiologenkaesten; sie steht am Schalter,
+   damit die Wahl nicht wie Geschmackssache aussieht. */
+.map-switch {
+  display: flex;
+  gap: 4px;
+  max-width: 420px;
+  margin: 0 auto 10px;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.map-tab {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: left;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition-property: background-color, color, border-color;
+  transition-duration: 120ms;
+  transition-timing-function: ease-out;
+}
+.map-tab:hover {
+  color: var(--text);
+}
+.map-tab--active {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+.map-tab-sub {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 420px) {
+  .map-switch {
+    flex-direction: column;
+  }
 }
 .heatmap-stack {
   position: relative;
