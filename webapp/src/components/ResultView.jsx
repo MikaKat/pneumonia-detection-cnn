@@ -10,11 +10,22 @@ import { useState } from "react";
 //
 // What is shown instead: the probability, the range it moves through when the
 // framing is nudged by a couple of percent, and what that does and does not mean.
+//
+// Since phase 10 the number is the mean of five separately calibrated models,
+// so there is a second spread to report: how far those five disagree with each
+// other on this image. It is a different question from the framing spread and
+// it is shown next to it rather than folded into it.
+//
+// The numbers quoted in the honesty block are from the held-out set of 3812
+// images, read once: `predictions_holdout/holdout.csv`, evaluated by
+// `rsna/befunde/rsna_phase10_auswertung.py`. The development figures next to
+// them are in `serving/model/kalibrierung_p10.json`.
 export function ResultView({ result, stages = [], originalUrl, onReset }) {
   const [opacity, setOpacity] = useState(0.6);
   const [showViews, setShowViews] = useState(false);
 
   const u = result.uncertainty;
+  const ens = result.ensemble?.per_fold?.length ? result.ensemble : null;
   const base = result.probability ?? 0;
   const median = u?.median ?? base;
   const lo = u?.min ?? base;
@@ -81,6 +92,17 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
           )}
         </p>
 
+        {ens && (
+          <p className="score-range">
+            The number above is the mean of <strong>{ens.folds} separately trained
+            models</strong>, each calibrated on its own data before averaging. On this
+            image they range from {pct(Math.min(...ens.per_fold))}% to{" "}
+            {pct(Math.max(...ens.per_fold))}%. That is disagreement between models,
+            which is a different thing from the framing spread above: five models can
+            agree with each other and still be wrong together.
+          </p>
+        )}
+
         {u && (
           <>
             <button className="btn btn-ghost btn-sm" onClick={() => setShowViews((v) => !v)}>
@@ -92,6 +114,12 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
                   <li key={v.view}>
                     <span className="muted">{v.view}</span>
                     <span>{pct(v.probability)}%</span>
+                  </li>
+                ))}
+                {ens?.per_fold?.map((p, i) => (
+                  <li key={`fold-${i}`}>
+                    <span className="muted">model {i + 1} of {ens.folds}</span>
+                    <span>{pct(p)}%</span>
                   </li>
                 ))}
               </ul>
@@ -149,6 +177,16 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
           <strong>half of the images the model called negative did have pneumonia</strong>{" "}
           (NPV 0.500). The ranking transferred, the calibration did not, and turning this
           score into a yes or no would rest on exactly the part that failed.
+        </p>
+        <p>
+          <strong>The score depends on how the film was taken, and this page cannot
+          tell.</strong> On the held-out set the model found 88% of pneumonias in AP
+          films and 81% in PA films, a gap of 7 points, and on the development data the
+          gap was 14. Separate thresholds per projection would close it, but nothing in
+          an uploaded image says which projection it is, so one threshold has to serve
+          both. The same asymmetry runs deeper than the threshold: the model can still
+          tell AP from PA at 0.75, and nine attempts to take that ability away did not
+          work. It is shipped with the model rather than hidden.
         </p>
       </div>
 

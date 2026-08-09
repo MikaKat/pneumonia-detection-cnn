@@ -15,6 +15,14 @@ Kernideen:
     überlasten - selbst bei 1 GB RAM läuft nie mehr als eine Inferenz parallel.
   * Rate-Limiting im Arbeitsspeicher (pro X-Client-Id, festes Zeitfenster).
   * Das Modell wird EINMAL beim Start geladen, nicht pro Anfrage.
+  * SEIT PHASE 10 IST DAS MODELL EIN ENSEMBLE. Geladen werden die fuenf
+    Fold-Gewichte `rsna_f{0..4}_s0_p5head_ex.pth`, jedes wird einzeln mit
+    SEINER Platt-Kurve kalibriert, und erst die fuenf WAHRSCHEINLICHKEITEN
+    werden gemittelt. Kurven, Gewichtsliste und Schwelle stehen zusammen in
+    `serving/model/kalibrierung_p10.json`; sie stammen ausschliesslich aus den
+    Entwicklungsdaten und standen fest, bevor der Holdout gerechnet wurde.
+    Genau diese Rechnung hat `rsna/pipeline/rsna_holdout.py` auf 3812
+    ungesehenen Bildern ausgewertet, und genau sie wird hier ausgeliefert.
   * STUFENWEISE AUSGABE: Die Vorverarbeitung wird nicht als Block gerechnet und
     am Ende ausgeliefert, sondern jede Stufe meldet ihr Bild, sobald es fertig
     ist (`job["stages"]`). GET /api/jobs/{id} gibt die bereits fertigen Stufen
@@ -25,6 +33,7 @@ Kernideen:
 
 import base64
 import io
+import json
 import os
 import queue
 import threading
@@ -45,8 +54,7 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 from torchvision import transforms as T
 
 import stages as pipeline_stages
-from data import transform as kermany_transform
-from model.model import build_model
+from model.model import HEAD_GRID, ClassifierView, build_two_head_model
 
 # --------------------------------------------------------------------------
 # Konfiguration (per Umgebungsvariable überschreibbar)
@@ -72,39 +80,49 @@ def _resolve(path: str) -> str:
     return path                                    # Fehlermeldung nennt das Original
 
 
-# Fold 4 der Variante mit voller Entkopplung (--balance-view --balance-strength
-# 1.0). Die frueher hier eingetragene Datei rsna_f4_s0.pth traegt nicht die
-# Basislinie, sondern das Zuschnitt-Modell: vor dem --tag-Schalter haben alle
-# Varianten in denselben Dateinamen geschrieben. Fold 4 ist unter den fuenf
-# Folds der mit der MITTLEREN geschichteten AUC (0,8233), also weder der beste
-# noch der schlechteste, damit die Demo nicht den Rosinen folgt.
-CHECKPOINT_PATH = _resolve(os.getenv("CHECKPOINT_PATH",
-                                     "checkpoints/rsna_f4_s0_bal10.pth"))
+# --------------------------------------------------------------------------
+# Die Kalibrierdatei ist die einzige Quelle fuer Gewichte, Kurven und Schwelle
+# --------------------------------------------------------------------------
+# Erzeugt von rsna/befunde/rsna_platt.py auf den 22872 Entwicklungsbildern, VOR
+# dem Holdout. Sie nennt drei Dinge, und alle drei gehoeren zusammen:
+#   * welche fuenf Gewichte das Ensemble bilden,
+#   * die Platt-Kurve (a, b) je Fold,
+#   * die Entscheidungsschwelle 0,2003.
+# Sie an EINER Stelle zu fuehren ist die Lehre aus dem 09.08.2026: im
+# Dockerfile stand ein `ENV THRESHOLD=0.5` und hat die Schwelle aus dem
+# Quelltext still ueberschrieben. Im Protokoll stand eine Zahl, im Container
+# lief eine andere, und nichts in der Ausgabe hat widersprochen.
+ARM_TAG = "_p5head_ex"
+CALIBRATION_PATH = _resolve(os.getenv("CALIBRATION_PATH",
+                                      "model/kalibrierung_p10.json"))
 
-# Welche Strecke das geladene Gewicht stammt. Das ist KEINE Kosmetik: die beiden
-# Strecken haben verschiedene Koepfe und verschiedene Vorverarbeitungen, und ein
-# Gewicht mit der falschen Vorverarbeitung zu fuettern liefert Zahlen, die wie
-# Wahrscheinlichkeiten aussehen und keine sind.
-#
-#   rsna     ResNet18, fc -> 1 Logit, Sigmoid.
-#            Resize(size) + Grayscale(3) + ToTensor + Normalize(ImageNet).
-#            Quelle: rsna/pipeline/rsna_train.py, build_transforms() und
-#            `m.fc = nn.Linear(m.fc.in_features, 1)`.
-#   kermany  ResNet18, fc -> 2 Klassen, Softmax, Index 1 = PNEUMONIA.
-#            Resize(224) + CLAHE + ToTensor + PerImageStandardize.
-#            Quelle: serving/data.py, dasselbe `transform`-Objekt, das der
-#            Trainingsloader benutzt.
-#
-# Beim Start wird gegen das state_dict geprueft, ob Familie und Gewicht
-# zusammenpassen; bei Widerspruch bricht der Start ab, statt still zu rechnen.
+# Ein gesetztes THRESHOLD ist ab jetzt ein Startfehler und keine Einstellung
+# mehr. Lieber laut abbrechen als leise mit einer Schwelle rechnen, die zu
+# keinem der fuenf Gewichte gehoert. docker-compose.yml hat genau diese
+# Variable bis zum 09.08.2026 noch auf 0.5 gesetzt.
+if os.getenv("THRESHOLD") is not None:
+    raise RuntimeError(
+        "THRESHOLD ist gesetzt. Die Schwelle gehoert zu den Gewichten und "
+        "kommt ausschliesslich aus der Kalibrierdatei "
+        f"({CALIBRATION_PATH}). Die Umgebungsvariable bitte entfernen; sie hat "
+        "am 09.08.2026 schon einmal still eine falsche Schwelle ausgeliefert."
+    )
+
+# Der Familienschalter ist keine Einstellung mehr. Ausgeliefert wird genau ein
+# Modell, das Phase-10-Ensemble; die alte Kermany-Strecke hat weder diesen Kopf
+# noch diese Vorverarbeitung. Er wird nur noch gelesen, um einen alten,
+# widersprechenden Wert laut abzulehnen statt ihn zu ignorieren.
 MODEL_FAMILY = os.getenv("MODEL_FAMILY", "rsna").lower()
+if MODEL_FAMILY != "rsna":
+    raise RuntimeError(
+        f"MODEL_FAMILY={MODEL_FAMILY!r}. Seit Phase 10 liefert dieser Dienst "
+        "ausschliesslich das RSNA-Ensemble aus; eine andere Familie hat weder "
+        "den zweiten Kopf noch dessen Vorverarbeitung."
+    )
+
 INPUT_SIZE = int(os.getenv("INPUT_SIZE", "224"))       # rsna_train.py --size, Vorgabe 224
 TEST_DIR = _resolve(os.getenv("TEST_DIR", "data/chest_xray/test"))
 CLASSES = ["NORMAL", "PNEUMONIA"]
-# Auf dem inneren Selektions-Split DIESES Modells gesucht (0.3115), nicht
-# geraten und nicht auf den Auswertungsdaten optimiert. Eine Schwelle aus
-# einem anderen Lauf waere fuer dieses Modell bedeutungslos.
-THRESHOLD = float(os.getenv("THRESHOLD", "0.3115"))
 SAMPLES_PER_CLASS = int(os.getenv("SAMPLES_PER_CLASS", "4"))
 
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))         # max. Analysen pro Fenster
@@ -117,34 +135,79 @@ SHOW_STAGES = os.getenv("SHOW_STAGES", "1") not in ("0", "false", "False")
 torch.set_num_threads(1)  # begrenzt CPU/RAM auf schwacher Hardware
 
 # --------------------------------------------------------------------------
-# Modell + Grad-CAM einmalig laden
+# Kalibrierung lesen, fuenf Modelle + fuenf Grad-CAMs einmalig laden
 # --------------------------------------------------------------------------
-if MODEL_FAMILY not in ("rsna", "kermany"):
-    raise RuntimeError(f"MODEL_FAMILY muss 'rsna' oder 'kermany' sein, nicht {MODEL_FAMILY!r}.")
-
-print(f"Lade Modell: {CHECKPOINT_PATH} (Familie: {MODEL_FAMILY}) ...")
-# weights_only=True: die Datei enthaelt nur Gewichte, also nicht den ganzen
-# Pickle-Interpreter zulassen. Ab Torch 2.6 ist das ohnehin die Vorgabe.
-_state = torch.load(CHECKPOINT_PATH, map_location="cpu", weights_only=True)
-
-# Der Kopf verraet die Strecke: 1 Ausgang heisst BCE/Sigmoid (rsna), 2 Ausgaenge
-# heissen CrossEntropy/Softmax (kermany). Passt das nicht zur eingestellten
-# Familie, waere die Vorverarbeitung mit hoher Wahrscheinlichkeit auch falsch,
-# und ein Score aus falscher Vorverarbeitung ist schlimmer als kein Score.
-_n_out = int(_state["fc.weight"].shape[0])
-_expected = 1 if MODEL_FAMILY == "rsna" else 2
-if _n_out != _expected:
+if not os.path.isfile(CALIBRATION_PATH):
     raise RuntimeError(
-        f"{CHECKPOINT_PATH} hat {_n_out} Ausgang/Ausgaenge, MODEL_FAMILY="
-        f"{MODEL_FAMILY!r} erwartet {_expected}. Entweder das Gewicht oder die "
-        f"Familie ist falsch gesetzt. Kein Start mit dieser Kombination."
+        f"{CALIBRATION_PATH} fehlt. Ohne sie gaebe es keine Wahrscheinlich"
+        "keiten, sondern nur Rohwerte, und die Schwelle waere bedeutungslos. "
+        "Die Datei gehoert ins Repo und in das Container-Abbild."
+    )
+with open(CALIBRATION_PATH, encoding="utf-8") as _fh:
+    CALIBRATION = json.load(_fh)
+
+if CALIBRATION.get("arm") != ARM_TAG:
+    raise RuntimeError(
+        f"die Kalibrierdatei gehoert zu Arm {CALIBRATION.get('arm')!r}, "
+        f"gebraucht wird {ARM_TAG!r}."
     )
 
-model = build_model(pretrained=False, num_classes=_n_out)
-model.load_state_dict(_state)
-model.eval()
-cam = GradCAM(model=model, target_layers=[model.layer4[-1]])
-print("Modell geladen.")
+PLATT = {int(e["fold"]): (float(e["a"]), float(e["b"])) for e in CALIBRATION["platt"]}
+FOLDS = sorted(PLATT)
+CHECKPOINT_PATHS = [_resolve(p) for p in CALIBRATION["checkpoints"]]
+if len(CHECKPOINT_PATHS) != len(FOLDS):
+    raise RuntimeError(
+        f"die Kalibrierdatei nennt {len(CHECKPOINT_PATHS)} Gewichte, aber "
+        f"{len(FOLDS)} Kurven. Das Ensemble sind ALLE Folds, nicht eine "
+        f"Auswahl daraus."
+    )
+THRESHOLD = float(CALIBRATION["schwelle"])
+
+print(f"Lade Ensemble aus {len(FOLDS)} Gewichten (Arm {ARM_TAG}) ...")
+NETS: list[torch.nn.Module] = []
+CAMS: list[GradCAM] = []
+for _k, _path in zip(FOLDS, CHECKPOINT_PATHS):
+    # Die Kurve wird ueber die REIHENFOLGE der beiden Listen an das Gewicht
+    # gebunden, und eine vertauschte Reihenfolge waere von aussen unsichtbar:
+    # herauskaeme eine Wahrscheinlichkeit, die wie eine aussieht. Deshalb muss
+    # der Dateiname die Fold-Nummer nennen, zu der die Kurve gehoert.
+    if f"_f{_k}_" not in os.path.basename(_path):
+        raise RuntimeError(
+            f"Fold {_k} bekaeme die Platt-Kurve von {os.path.basename(_path)}. "
+            f"Reihenfolge der Listen 'checkpoints' und 'platt' in "
+            f"{CALIBRATION_PATH} pruefen."
+        )
+    if not os.path.isfile(_path):
+        raise RuntimeError(
+            f"{_path} fehlt. Das ausgelieferte Modell ist das Mittel ueber "
+            f"ALLE {len(FOLDS)} Folds; mit vier davon waere es ein anderes "
+            f"Modell als das auf dem Holdout gemessene."
+        )
+    # weights_only=True: die Datei enthaelt nur Gewichte, also nicht den ganzen
+    # Pickle-Interpreter zulassen. Ab Torch 2.6 ist das ohnehin die Vorgabe.
+    _state = torch.load(_path, map_location="cpu", weights_only=True)
+    _net = build_two_head_model(HEAD_GRID)
+    # Dieselbe Pruefung wie in rsna/pipeline/rsna_holdout.py: ein einkoepfiges
+    # Gewicht wuerde bei strict=False klaglos laden und stillschweigend ein
+    # anderes Modell ausliefern. Erst der Abgleich der Schluessel faengt das.
+    _missing, _unexpected = _net.load_state_dict(_state, strict=False)
+    if _missing or _unexpected:
+        raise RuntimeError(
+            f"{os.path.basename(_path)} passt nicht auf das zweikoepfige "
+            f"Modell. Fehlend {list(_missing)[:4]}, ueberzaehlig "
+            f"{list(_unexpected)[:4]}."
+        )
+    _net.eval()
+    NETS.append(_net)
+    # ClassifierView reicht den Logit heraus und stellt DASSELBE layer4-Objekt
+    # nach aussen, auf das Grad-CAM beim einkoepfigen Modell gezeigt hat. Das
+    # zweikoepfige Modell gaebe ein Tupel zurueck, und daran bricht
+    # pytorch_grad_cam.
+    _view_net = ClassifierView(_net)
+    CAMS.append(GradCAM(model=_view_net, target_layers=[_view_net.layer4]))
+    print(f"  Fold {_k}: {os.path.basename(_path)}  "
+          f"Platt a={PLATT[_k][0]:.4f} b={PLATT[_k][1]:.4f}")
+print(f"Ensemble geladen. Schwelle {THRESHOLD:.4f} aus {CALIBRATION_PATH}.")
 
 
 # --------------------------------------------------------------------------
@@ -154,6 +217,15 @@ print("Modell geladen.")
 # Bewusst nicht importiert: das Trainingsmodul zieht die halbe Trainingsstrecke
 # mit, und der Serving-Prozess soll klein bleiben. Wer dort die Transform
 # aendert, muss sie hier mitziehen; deshalb steht die Quelle im Kommentar.
+#
+# ACHTUNG, GEAENDERT BEIM UMBAU AUF DAS ENSEMBLE: das Bild wird jetzt ZUERST
+# nach Graustufen gewandelt und DANN skaliert. Der Trainingslader tut genau das
+# (`Image.open(...).convert("L")` in RsnaDataset, danach `Resize`), die App hat
+# bis dahin ein RGB-Bild skaliert und erst danach entfaerbt. Bei einer grauen
+# Roentgenaufnahme ist der Unterschied null, bei einem farbigen Upload nicht.
+# Der Rauchtest in tests/test_serving_ensemble.py vergleicht die App gegen
+# rsna_holdout.py, und ohne diese Reihenfolge waere er nicht zu bestehen
+# gewesen.
 _IMNET_MEAN, _IMNET_STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
 rsna_transform = T.Compose([
     T.Resize((INPUT_SIZE, INPUT_SIZE)),
@@ -162,20 +234,25 @@ rsna_transform = T.Compose([
     T.Normalize(_IMNET_MEAN, _IMNET_STD),
 ])
 
-transform = rsna_transform if MODEL_FAMILY == "rsna" else kermany_transform
+
+def model_input(pil_img: Image.Image) -> torch.Tensor:
+    """Ein PIL-Bild als Modelleingabe (3, 224, 224), ohne Stapel-Achse."""
+    return rsna_transform(pil_img.convert("L"))
 
 
-def pneumonia_prob(tensor: torch.Tensor) -> float:
-    """Wahrscheinlichkeit fuer PNEUMONIA aus der Modellausgabe.
+def _logit(p: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    p = np.clip(np.asarray(p, dtype=float), eps, 1.0 - eps)
+    return np.log(p / (1.0 - p))
 
-    Die beiden Strecken rechnen verschieden: ein Logit mit Sigmoid (rsna) gegen
-    zwei Klassen mit Softmax und Index 1 (kermany). Das an genau einer Stelle zu
-    haben heisst, dass Einzelbild und TTA garantiert dieselbe Zahl bilden.
+
+def platt_apply(p: np.ndarray, a: float, b: float) -> np.ndarray:
+    """Die Platt-Kurve eines Folds, Zeichen fuer Zeichen wie im Holdout.
+
+    Quelle: rsna/pipeline/rsna_holdout.py, `platt_apply`. Dieselbe Formel und
+    dasselbe eps, damit die App fuer dasselbe Bild dieselbe Zahl liefert wie
+    die Auswertung. Der Rauchtest prueft genau das nach.
     """
-    out = model(tensor)
-    if MODEL_FAMILY == "rsna":
-        return float(torch.sigmoid(out)[0, 0])
-    return float(torch.softmax(out, dim=1)[0][1])
+    return 1.0 / (1.0 + np.exp(-(a * _logit(p) + b)))
 
 # Der Segmenter ist OPTIONAL. Fehlt checkpoints/unet_best.pth, laeuft die
 # Analyse unveraendert weiter, nur die Lungenfinder-Karte entfaellt. Sie war nie
@@ -205,13 +282,12 @@ def _png_base64(rgb_uint8: np.ndarray) -> str:
 # --------------------------------------------------------------------------
 # Warum ausgerechnet Ausschnitts-Verschiebungen und keine Drehungen oder
 # Helligkeitsaenderungen:
-#   * Helligkeit taugt in beiden Strecken nicht als Sonde, aber aus zwei
-#     verschiedenen Gruenden. Bei kermany macht `PerImageStandardize` sie per
-#     Konstruktion wirkungslos: die Variante liefert garantiert dieselbe Zahl
-#     und taeuscht eine Stabilitaet vor, die nur die Normierung ist. Bei rsna
-#     wird mit fester ImageNet-Normierung gerechnet, dort WAERE Helligkeit
-#     wirksam - aber das Training augmentiert bereits mit ColorJitter(0.15),
-#     eine Helligkeitssonde misst also die Augmentierung und nicht das Bild.
+#   * Helligkeit taugt nicht als Sonde. Gerechnet wird mit fester
+#     ImageNet-Normierung, dort WAERE Helligkeit wirksam - aber das Training
+#     augmentiert bereits mit ColorJitter(0.15), eine Helligkeitssonde misst
+#     also die Augmentierung und nicht das Bild. Phase 9 hat die Sache
+#     nachgemessen: der Kanal, an dem die Aufnahmeart haengt, ist ohnehin der
+#     Kontrast und nicht die Helligkeit.
 #   * Drehungen erzeugen schwarze Ecken. Deren Wirkung auf den Score waere ein
 #     Artefakt der Fuellfarbe, nicht der Anatomie.
 #   * AUSSCHNITT und ZOOM sind dagegen genau der Kanal, der in diesem Projekt
@@ -247,14 +323,69 @@ def _view(pil_img: Image.Image, frac: float, dx: float, dy: float) -> Image.Imag
 
 
 @torch.no_grad()
-def tta_scores(pil_img: Image.Image) -> list[dict]:
-    """Wahrscheinlichkeit je Variante. Erste Variante = unveraendertes Bild."""
-    out = []
-    for name, frac, dx, dy in TTA_VIEWS:
-        t = transform(_view(pil_img, frac, dx, dy)).unsqueeze(0)
-        p = pneumonia_prob(t)
-        out.append({"view": name, "probability": round(p, 4)})
-    return out
+def ensemble_scores(pil_img: Image.Image) -> tuple[np.ndarray, np.ndarray, list[float], torch.Tensor]:
+    """Die ganze Rechnung des ausgelieferten Modells in einem Durchgang.
+
+    Rueckgabe:
+      p_views    kalibrierte Ensemble-Wahrscheinlichkeit je TTA-Variante.
+                 `p_views[0]` gehoert zum unveraenderten Bild und ist DIE Zahl,
+                 die die Oberflaeche anzeigt.
+      feld       das gemittelte Kopffeld des unveraenderten Bildes, 14 x 14,
+                 nach der Sigmoid-Funktion. Genau wie in rsna_holdout.py.
+      p_folds    die fuenf Einzelwahrscheinlichkeiten des unveraenderten
+                 Bildes, kalibriert. Nur zur Anzeige, sie gehen als Mittel
+                 ohnehin in p_views[0] ein.
+      x0         die Modelleingabe des unveraenderten Bildes, fuer Grad-CAM und
+                 fuer die Stufenanzeige.
+
+    Die fuenf Varianten gehen als EIN Stapel durch jedes Modell, nicht einzeln.
+    Das sind fuenf Vorwaertsrechnungen statt fuenfundzwanzig; auf einem Kern
+    ist das der Unterschied zwischen einer und mehreren Sekunden.
+
+    Die Reihenfolge ist die des Holdout-Skripts und nicht umstellbar: erst
+    Sigmoid, dann Platt JE FOLD, dann mitteln. Wer erst mittelt und danach
+    kalibriert, rechnet etwas anderes aus.
+    """
+    batch = torch.stack([model_input(_view(pil_img, frac, dx, dy))
+                         for _, frac, dx, dy in TTA_VIEWS])
+
+    summe = np.zeros(len(TTA_VIEWS), dtype=float)
+    summe_feld = np.zeros((HEAD_GRID, HEAD_GRID), dtype=float)
+    p_folds: list[float] = []
+
+    for k, net in zip(FOLDS, NETS):
+        logit, feld = net(batch)
+        p_roh = torch.sigmoid(logit[:, 0]).numpy().astype(float)
+        a, b = PLATT[k]
+        p_kal = platt_apply(p_roh, a, b)
+        summe += p_kal
+        # Nur das unveraenderte Bild traegt zum Kopffeld bei. Ein Feld ueber
+        # verschobene Ausschnitte zu mitteln waere ein verwischtes Feld, und
+        # verwischt heisst hier nicht vorsichtig, sondern falsch verortet.
+        summe_feld += torch.sigmoid(feld[0, 0]).numpy().astype(float)
+        p_folds.append(float(p_kal[0]))
+
+    return (summe / len(FOLDS), summe_feld / len(FOLDS), p_folds,
+            batch[0:1])
+
+
+def ensemble_cam(input_tensor: torch.Tensor) -> np.ndarray:
+    """Grad-CAM des Ensembles: der Mittelwert der fuenf Einzelkarten.
+
+    Die Karte EINES Folds zu zeigen waere die Erklaerung eines Modells, das die
+    angezeigte Zahl nicht erzeugt hat. Jede Einzelkarte ist von
+    `pytorch_grad_cam` bereits auf 0 bis 1 gestreckt, das Mittel ist also der
+    Anteil der Folds, die eine Stelle warm finden, und nicht die Summe
+    unvergleichbarer Skalen.
+
+    Kostet fuenf Rueckwaertsschritte statt einem. Das ist der Preis dafuer,
+    dass die Karte zu der Zahl daneben gehoert.
+    """
+    acc = None
+    for c in CAMS:
+        g = c(input_tensor=input_tensor)[0]
+        acc = g if acc is None else acc + g
+    return acc / len(CAMS)
 
 
 def run_inference(pil_img: Image.Image, emit=None) -> dict:
@@ -266,16 +397,18 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
 
     Wertungspfad (stages.PIPELINE), und nur diese drei sind eine Kette:
         1. Hochgeladenes Bild
-        2. Modelleingabe 224x224 (CLAHE + Per-Bild-Standardisierung)
-        3. Grad-CAM
+        2. Modelleingabe 224x224 (Graustufen, skalieren, ImageNet-Normierung)
+        3. Grad-CAM, gemittelt ueber die fuenf Modelle
 
-    Daneben (stages.ASIDES), ausdruecklich KEIN Kettenglied:
+    Daneben (stages.ASIDES), ausdruecklich KEINE Kettenglieder:
         Lungenmaske (U-Net), `group: "aside"`
+        Kopffeld des Ensembles, `group: "aside"`
 
-    Klassifiziert wird das Vollbild, genau so wie trainiert wurde: `transform`
-    aus data.py ist dasselbe Objekt, das auch der Trainingsloader benutzt, und
-    es enthaelt weder Maske noch Zuschnitt. Die Maske wird echt gerechnet und
-    gezeigt, beruehrt den Score aber nicht.
+    Klassifiziert wird das Vollbild, genau so wie trainiert wurde: dieselbe
+    Skalierung und dieselbe feste Normierung wie in
+    `rsna_train.build_transforms(224, train=False)`, weder Maske noch
+    Zuschnitt. Die Maske wird echt gerechnet und gezeigt, beruehrt den Score
+    aber nicht.
 
     Die Zuschnitt-Stufe ist entfallen. Sie stand zwischen Maske und
     Modelleingabe und legte damit nahe, der Zuschnitt werde klassifiziert; genau
@@ -314,33 +447,49 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
         else:
             _emit("mask", None, skipped=True, reason="Segmentation model not available.")
 
-    # --- 2: Modelleingabe --------------------------------------------------
+    # --- 2: Modelleingabe + die ganze Ensemble-Rechnung --------------------
+    # Beides in einem Schritt, weil die Modelleingabe des unveraenderten Bildes
+    # ohnehin als erste Zeile des TTA-Stapels entsteht. Sie ein zweites Mal zu
+    # bauen hiesse, eine Zahl aus einem anderen Rechenweg anzuzeigen als die,
+    # die gerechnet wurde.
     ts = time.time()
-    input_tensor = transform(pil_img).unsqueeze(0)  # (1, 3, 224, 224)
+    p_views, feld, p_folds, input_tensor = ensemble_scores(pil_img)
     if emit is not None:
         _emit("model_input", pipeline_stages.render_model_input(input_tensor),
               ms=_stage_ms(ts))
 
-    with torch.no_grad():
-        prob_pneu = pneumonia_prob(input_tensor)
-
-    # Streuung ueber leicht verschobene Bildausschnitte. Die erste Variante ist
-    # das unveraenderte Bild und liefert dieselbe Zahl wie oben; sie wird
-    # trotzdem mitgerechnet, damit die Liste vollstaendig ist und nicht eine
-    # Zahl aus einem anderen Rechenweg dazwischensteht.
-    views = tta_scores(pil_img)
+    prob_pneu = float(p_views[0])
+    views = [{"view": name, "probability": round(float(p), 4)}
+             for (name, _, _, _), p in zip(TTA_VIEWS, p_views)]
     vals = sorted(v["probability"] for v in views)
     mid = len(vals) // 2
     median = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
 
-    # --- 5: Grad-CAM (braucht Gradienten, daher kein no_grad) --------------
+    # --- 3: Grad-CAM (braucht Gradienten, daher kein no_grad) --------------
     ts = time.time()
-    grayscale_cam = cam(input_tensor=input_tensor)[0]
-    rgb = np.array(pil_img.resize((224, 224))).astype(np.float32) / 255.0
+    grayscale_cam = ensemble_cam(input_tensor)
+    rgb = np.array(pil_img.convert("RGB").resize((224, 224))).astype(np.float32) / 255.0
     overlay = show_cam_on_image(rgb, grayscale_cam, use_rgb=True)  # uint8 RGB
     heatmap_b64 = _png_base64(overlay)
     if emit is not None:
         _emit("heatmap", heatmap_b64, ms=_stage_ms(ts))
+
+    # --- daneben: das Kopffeld ---------------------------------------------
+    # Der zweite Ausgang desselben Modells, also KEIN Nebenschauplatz im Sinne
+    # der Lungenmaske: er stammt aus genau dem Netz, das die Zahl oben erzeugt
+    # hat. Er beruehrt die Zahl trotzdem nicht, deshalb steht er neben der
+    # Kette und nicht darin.
+    #
+    # Ohne jede Schwelle gezeichnet, und das ist keine Bequemlichkeit: der
+    # Pegel des Kopfes ist unkalibriert, auf gesunden Bildern schlaegt er in
+    # 62 Prozent der Faelle an (Phase 5b). Ein Kasten oder eine Umrandung
+    # waere eine Behauptung ueber genau die Groesse, die nachweislich nicht
+    # stimmt. Ein Verlauf ist die staerkste Aussage, die die Messung traegt.
+    head_b64 = None
+    if emit is not None:
+        ts = time.time()
+        head_b64 = pipeline_stages.render_head_field(pil_img, feld)
+        _emit("head_field", head_b64, ms=_stage_ms(ts))
 
     # Ohne Labelfeld, mit Absicht: die Entscheidungsschwelle traegt zwischen
     # Datensaetzen nicht (NPV 0.500 in der externen Pruefung, siehe README
@@ -357,6 +506,21 @@ def run_inference(pil_img: Image.Image, emit=None) -> dict:
             "views": views,
             "method": "test-time augmentation over small framing changes",
         },
+        # Die zweite Streuungsquelle, und die interessantere: nicht wie weit der
+        # Wert unter Bildaenderungen wandert, sondern wie weit die fuenf
+        # Modelle auseinanderliegen, aus denen der angezeigte Mittelwert
+        # gebildet ist.
+        "ensemble": {
+            "folds": len(FOLDS),
+            "per_fold": [round(p, 4) for p in p_folds],
+            "spread": round(max(p_folds) - min(p_folds), 4),
+        },
+        "head_field": {
+            "grid": HEAD_GRID,
+            "max": round(float(feld.max()), 4),
+            "values": [[round(float(v), 4) for v in row] for row in feld],
+        },
+        "head_field_png_base64": head_b64,
         "heatmap_png_base64": heatmap_b64,
         "inference_ms": int((time.time() - t0) * 1000),
     }
@@ -533,6 +697,15 @@ def health():
         "model_loaded": True,
         "stages_enabled": SHOW_STAGES,
         "segmentation_loaded": pipeline_stages.segmenter_status()["available"],
+        # Damit im Betrieb nachzusehen ist, WAS geladen wurde, ohne in die
+        # Protokolle zu greifen. Die Schwelle steht bewusst dabei: sie ist die
+        # Zahl, die am 09.08.2026 im Container eine andere war als im Text.
+        "ensemble": {
+            "arm": ARM_TAG,
+            "folds": len(FOLDS),
+            "threshold": round(THRESHOLD, 4),
+            "calibration": os.path.basename(CALIBRATION_PATH),
+        },
     }
 
 

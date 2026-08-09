@@ -14,6 +14,7 @@ import { ImageSource } from "./components/ImageSource.jsx";
 import { QueueStatus } from "./components/QueueStatus.jsx";
 import { PipelineView } from "./components/PipelineView.jsx";
 import { LungFinder } from "./components/LungFinder.jsx";
+import { HeadField } from "./components/HeadField.jsx";
 import { ResultView } from "./components/ResultView.jsx";
 
 export default function App() {
@@ -163,7 +164,8 @@ export default function App() {
         <header className="app-header">
           <h1>Chest X-ray Pneumonia Detection</h1>
           <p className="subtitle">
-            Educational demo of a ResNet-18 classifier with Grad-CAM explanations.
+            Educational demo of an ensemble of five ResNet-18 models, calibrated and
+            evaluated once on 3812 held-out images.
           </p>
         </header>
 
@@ -234,7 +236,10 @@ export default function App() {
             interrupt the scored path; it renders nothing when no segmenter is
             available. */}
         {(phase === "done" || phase === "running") && (
-          <LungFinder plan={asidePlan} stages={stages} />
+          <>
+            <HeadField plan={asidePlan} stages={stages} result={result} />
+            <LungFinder plan={asidePlan} stages={stages} />
+          </>
         )}
 
         {phase === "done" && result && (

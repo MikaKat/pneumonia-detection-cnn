@@ -8,15 +8,22 @@ browser while the analysis is still running.
 
 Honesty about what is shown
 ---------------------------
-Two of the tiles are development stages, not production stages. The deployed
-classifier runs on the FULL image, exactly as it was trained. The lung mask and
-the lung crop were built and measured in this project (`segmentation/`,
-`rsna/pipeline/rsna_make_crops.py`) and both were rejected on the RSNA data:
-the pixel-exact mask destroys pathology and re-encodes the shape as a shortcut,
-and the crop did not move the confounder score in the intended direction.
-They are computed here for real and shown for real, but flagged as `explored`
-so nobody reads the chain as "this is what the score came out of". `main.py`
-sends that flag along; the frontend greys those tiles and states it in words.
+The deployed classifier runs on the FULL image, exactly as it was trained. Two
+kinds of tile sit off to the side of that path and neither one touches the
+score.
+
+The lung mask was built and measured in this project (`segmentation/`,
+`rsna/pipeline/rsna_make_crops.py`) and rejected on the RSNA data: the
+pixel-exact mask destroys pathology and re-encodes the shape as a shortcut, and
+the crop did not move the confounder score in the intended direction. It is
+computed here for real and shown for real, but flagged as `explored` so nobody
+reads the chain as "this is what the score came out of".
+
+The head field is different in kind. It is the second output of the very
+network that produced the score, so it is not rejected work; it simply does not
+feed the number. It is shown without a box and without a cut-off because its
+level is uncalibrated. Both are `group: "aside"`; the frontend draws them on a
+separate branch rather than as links in the chain.
 
 Every image leaves here as a base64 PNG without the `data:` prefix, capped at
 `VIEW_SIZE` on the long edge so the JSON stays small.
@@ -46,38 +53,23 @@ CROP_PAD = 0.05          # margin around the lung bounding box, per side
 # The frontend fetches this once (GET /api/pipeline) and can draw the empty
 # chain with all its labels before a single image has been uploaded. Keys must
 # match the `key` of the stages emitted during the run.
-# The model input stage is described differently depending on which weights the
-# server loaded, because the two training runs preprocess differently. Kept next
-# to each other so the difference is visible in one screen rather than hidden in
-# an if. MODEL_FAMILY is set in main.py and checked there against the checkpoint.
-_FAMILY = os.getenv("MODEL_FAMILY", "rsna").lower()
-
-_FAMILY_TEXT = {
-    "rsna": {
-        "caption": "Resize to 224x224, greyscale, then the fixed ImageNet "
-                   "normalisation the model was trained with. Computed on the full "
-                   "uploaded image.",
-        "note": "The normalisation subtracts the same constants from every image, so "
-                "unlike the picture above it, brightness differences between images "
-                "survive it. It is invisible here anyway: the tensor is re-stretched "
-                "to 0-255 for display, and normalisation and stretch are both affine, "
-                "so they cancel. What you can see is the resize. The model works on "
-                "the unbounded values.",
-    },
-    "kermany": {
-        "caption": "Resize to 224x224, CLAHE for local structure, then per-image "
-                   "standardisation to mean 0 / std 1. Computed on the full "
-                   "uploaded image.",
-        "note": "The per-image standardisation is what removed the global "
-                "brightness/contrast shortcut. It is invisible in this picture by "
-                "construction: the tensor is re-stretched to 0-255 for display, and "
-                "standardisation and stretch are both affine, so they cancel. What "
-                "you can see here is the resize and CLAHE. The model works on the "
-                "unbounded values.",
-    },
+# The wording of the model input stage used to branch on which training run the
+# weights came from. Since phase 10 there is only one deployed model, so the
+# branch is gone and the text says plainly what the transform does. It has to
+# keep saying it: main.py rebuilds that transform from
+# rsna_train.build_transforms, and a caption describing a different one would be
+# a plain untruth.
+_MODEL_INPUT_TEXT = {
+    "caption": "Greyscale, resize to 224x224, then the fixed ImageNet "
+               "normalisation the model was trained with. Computed on the full "
+               "uploaded image.",
+    "note": "The normalisation subtracts the same constants from every image, so "
+            "unlike a per-image standardisation it lets brightness differences "
+            "between images survive. It is invisible here anyway: the tensor is "
+            "re-stretched to 0-255 for display, and normalisation and stretch are "
+            "both affine, so they cancel. What you can see is the resize. The model "
+            "works on the unbounded values.",
 }
-if _FAMILY not in _FAMILY_TEXT:
-    _FAMILY = "rsna"
 
 
 # This list is the scored path and nothing else. Every entry here really does
@@ -98,19 +90,20 @@ PIPELINE = [
         # two operations that actually change the picture, and standing next to a
         # crop tile it invited the reading that the crop was what got seen.
         #
-        # Caption and note depend on which weights are loaded, because the two
-        # training runs normalise differently and a caption describing the other
-        # one would be a plain untruth. See MODEL_FAMILY in main.py.
         "title": "Resize and normalise",
-        "caption": _FAMILY_TEXT[_FAMILY]["caption"],
+        "caption": _MODEL_INPUT_TEXT["caption"],
         "status": "active",
-        "note": _FAMILY_TEXT[_FAMILY]["note"],
+        "note": _MODEL_INPUT_TEXT["note"],
     },
     {
         "key": "heatmap",
         "title": "Grad-CAM heatmap",
-        "caption": "Where the last convolutional block contributed most to the score.",
+        "caption": "Where the last convolutional block contributed most to the score, "
+                   "averaged over the five models of the ensemble.",
         "status": "active",
+        "note": "One map per fold would explain a model that did not produce the "
+                "number shown. Each map is already stretched to 0-1 by Grad-CAM, so "
+                "the average is the share of the five models that find a place warm.",
     },
 ]
 
@@ -134,6 +127,21 @@ ASIDES = [
                 "alone still carries the confounder, and the mask cuts into the "
                 "pathology it is meant to isolate. It is shown because it is a working "
                 "segmenter, not because the classifier needs it.",
+    },
+    {
+        "key": "head_field",
+        "title": "Where the model points",
+        "caption": "The second output of the same network: a 14x14 field trained "
+                   "against the radiologist boxes, averaged over the five models.",
+        "status": "active",
+        "group": "aside",
+        "note": "This comes out of the very network that produced the score, but it "
+                "does not feed the score. It is drawn as a gradient with no box and "
+                "no cut-off, on purpose: the level of this field is not calibrated. "
+                "On images without pneumonia it still lights up in 62 % of cases, so "
+                "a drawn box would be a claim about exactly the quantity that was "
+                "measured and found wanting. Read it as a hint about the region, "
+                "never as a finding.",
     },
 ]
 
@@ -204,15 +212,24 @@ def _find_unet_checkpoint() -> Path | None:
 
 
 def _import_unet():
-    """`segmentation/` lives at the repo root in development and is copied next
-    to this file in the container. Cover both without duplicating the model."""
+    """`segmentation/` sits next to this file, in development and in the
+    container alike.
+
+    It used to live at the repo root, because it was research code. It is not
+    that any more: the classifier does not use it, nothing in `rsna/` needs it
+    at serving time, and the only thing that still asks for it is the card this
+    module draws. So it moved in here, where its one remaining consumer is.
+
+    The fallback covers being started from a working directory other than this
+    one, which happens in development often enough to be worth two lines.
+    """
     try:
         from segmentation.unet import UNet  # noqa: PLC0415
         return UNet
     except ImportError:
-        root = str(Path(__file__).resolve().parent.parent)
-        if root not in sys.path:
-            sys.path.insert(0, root)
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
         from segmentation.unet import UNet  # noqa: PLC0415
         return UNet
 
@@ -387,13 +404,54 @@ def render_crop(pil_img: Image.Image, mask: np.ndarray) -> tuple[str, dict]:
     return _png_b64(crop), box
 
 
-def render_model_input(tensor: torch.Tensor) -> str:
-    """The standardised 224x224 tensor, re-stretched to 0-255 for display.
+def render_head_field(pil_img: Image.Image, field: np.ndarray) -> str:
+    """Das 14x14-Kopffeld als weicher Verlauf ueber dem Bild.
 
-    After PerImageStandardize the values are centred on 0 with std 1 and have no
-    fixed range, so they cannot be shown directly. The stretch is a display
-    device only - it is stated as such in the caption, because a picture that
-    silently differs from the model input is worse than no picture.
+    Drei Entscheidungen, und jede einzelne ist eine Aussage darueber, was die
+    Messung traegt:
+
+    KEINE SCHWELLE. Der Pegel des Kopfes ist unkalibriert: auf Bildern ohne
+    Pneumonie schlaegt er in 62 Prozent der Faelle an (Phase 5b). Ein Kasten,
+    eine Umrandung oder ein Schnitt bei 0,5 waere eine Behauptung ueber genau
+    die Groesse, die nachgemessen und fuer untauglich befunden wurde.
+
+    KEINE STRECKUNG JE BILD. Die Werte sind Wahrscheinlichkeiten zwischen 0 und
+    1 und werden genau so eingefaerbt. Wuerde jedes Bild auf sein eigenes
+    Maximum gestreckt, saehe ein Feld ohne jeden Ausschlag genauso deutlich aus
+    wie ein starkes, und der Unterschied zwischen "hier" und "nirgends" waere
+    weggerechnet.
+
+    DECKKRAFT PROPORTIONAL ZUM WERT. Wo der Kopf nichts sagt, bleibt das
+    Roentgenbild sichtbar. Das ist der bildliche Weg, "keine Aussage" von
+    "Aussage: nein" zu unterscheiden.
+
+    Bilineare Vergroesserung von 14 auf 224 und danach Begrenzung auf 0 bis 1:
+    eine kubische Vergroesserung ueberschwingt und erzeugt Werte, die im Feld
+    nicht stehen.
+    """
+    base = np.asarray(pil_img.convert("L").resize((224, 224), Image.BILINEAR))
+    rgb = np.stack([base] * 3, axis=-1).astype(np.float32)
+
+    f = cv2.resize(field.astype(np.float32), (224, 224), interpolation=cv2.INTER_LINEAR)
+    f = np.clip(f, 0.0, 1.0)
+
+    # INFERNO und nicht JET: der Grad-CAM daneben ist JET, und zwei Karten mit
+    # derselben Farbskala werden fuer dieselbe Karte gehalten.
+    colour = cv2.applyColorMap((f * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+    colour = cv2.cvtColor(colour, cv2.COLOR_BGR2RGB).astype(np.float32)
+
+    alpha = (0.75 * f)[..., None]
+    out = (1.0 - alpha) * rgb + alpha * colour
+    return _png_b64(np.clip(out, 0, 255).astype(np.uint8))
+
+
+def render_model_input(tensor: torch.Tensor) -> str:
+    """The normalised 224x224 tensor, re-stretched to 0-255 for display.
+
+    After the ImageNet normalisation the values have no fixed range, so they
+    cannot be shown directly. The stretch is a display device only - it is
+    stated as such in the caption, because a picture that silently differs from
+    the model input is worse than no picture.
     """
     t = tensor.detach()
     if t.ndim == 4:

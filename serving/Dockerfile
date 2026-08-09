@@ -18,30 +18,49 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Anwendungscode + Modellgewichte + Beispielbilder
+# serving/model/ enthaelt model.py UND kalibrierung_p10.json. Die JSON-Datei ist
+# nicht Beiwerk: sie nennt die fuenf Gewichte, die fuenf Platt-Kurven und die
+# Schwelle. Ohne sie startet main.py gar nicht erst.
 COPY serving/model/ ./model/
 COPY serving/data.py serving/main.py serving/stages.py ./
-# Das Klassifikatorgewicht MUSS zu MODEL_FAMILY weiter unten passen: rsna_* hat
-# EINEN Logit, best_model* hat zwei Klassen. main.py prueft das beim Start gegen
-# die Form von fc.weight und bricht bei Widerspruch ab, statt mit der falschen
-# Vorverarbeitung zu rechnen. Wer hier die Datei tauscht, muss MODEL_FAMILY
-# mittauschen.
-COPY checkpoints/rsna_f4_s0_bal10.pth ./checkpoints/
+# ALLE FUENF Gewichte des Phase-10-Ensembles, rund 224 MB. Vier davon waeren ein
+# anderes Modell als das auf dem Holdout gemessene, deshalb bricht main.py beim
+# Start ab, wenn eines fehlt.
+#
+# Damit sie ueberhaupt im Build-Kontext liegen, braucht .gitignore fuer jede
+# einzelne eine Ausnahme. Genau daran ist der Build am 26.07. schon einmal
+# gescheitert: eine Zeile `*.pth` und ein COPY, das darauf zeigt.
+COPY checkpoints/rsna_f0_s0_p5head_ex.pth \
+     checkpoints/rsna_f1_s0_p5head_ex.pth \
+     checkpoints/rsna_f2_s0_p5head_ex.pth \
+     checkpoints/rsna_f3_s0_p5head_ex.pth \
+     checkpoints/rsna_f4_s0_p5head_ex.pth \
+     ./checkpoints/
 COPY serving/samples ./samples
 
-# Segmenter für die Masken-/Crop-Kachel der Pipeline-Ansicht.
+# Segmenter für die Lungenfinder-Karte.
 # Nur unet.py wird gebraucht (die Architektur), nicht das ganze Trainingspaket.
-# Fehlen diese beiden Zeilen, läuft die App weiter - die zwei Kacheln melden
-# dann "übersprungen" statt ein Bild zu zeigen (siehe serving/stages.py).
-COPY segmentation/__init__.py segmentation/unet.py ./segmentation/
+# Fehlen diese beiden Zeilen, läuft die App weiter - die Karte entfällt dann
+# einfach (siehe serving/stages.py). Der Ordner liegt seit dem 09.08.2026 unter
+# serving/, weil die App sein einziger verbliebener Nutzer ist.
+COPY serving/segmentation/__init__.py serving/segmentation/unet.py ./segmentation/
 COPY checkpoints/unet_best.pth ./checkpoints/
 
-# Strecke und Gewicht. Beides zusammen, weil beides zusammen stimmen muss.
-ENV MODEL_FAMILY=rsna
-ENV CHECKPOINT_PATH=checkpoints/rsna_f4_s0_bal10.pth
+# KEIN ENV CHECKPOINT_PATH und KEIN ENV MODEL_FAMILY mehr. Welche Gewichte das
+# Ensemble bilden, steht in serving/model/kalibrierung_p10.json, zusammen mit
+# den Kurven und der Schwelle, die zu genau diesen Gewichten gehoeren. Drei
+# Angaben, die nur gemeinsam stimmen, gehoeren in eine Datei und nicht in drei
+# Umgebungsvariablen.
 
 # In Produktion die kleinen Beispielbilder statt des großen Datensatzes nutzen
 ENV TEST_DIR=samples
-ENV THRESHOLD=0.5
+# KEIN ENV THRESHOLD hier. Bis zum 09.08.2026 stand an dieser Stelle 0.5 und
+# hat die 0.3115 aus main.py still ueberschrieben: im Protokoll stand eine
+# Schwelle, im Container lief eine andere, und nichts in der Ausgabe hat
+# widersprochen. Die Zeile wurde entfernt, die gleichlautende in
+# docker-compose.yml aber nicht, und die haette denselben Fehler weitergefuehrt.
+# Seit dem Umbau bricht main.py bei gesetztem THRESHOLD ab, statt ihn zu
+# befolgen: ein Fehler, der nur durch Disziplin nicht wiederkommt, kommt wieder.
 ENV RATE_LIMIT=10
 ENV RATE_WINDOW=3600
 # Vorverarbeitungskette in der Oberfläche zeigen (0 = nur Ergebnis, spart RAM/CPU)

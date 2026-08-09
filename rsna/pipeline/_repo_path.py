@@ -3,7 +3,7 @@
 Python legt beim direkten Aufruf nur den Ordner des SKRIPTS auf `sys.path`.
 `rsna/befunde/rsna_cam_lung_check.py` findet damit `rsna_train` nicht, das eine
 Ebene daneben in `rsna/pipeline/` liegt, und `rsna_make_masks.py` findet
-`segmentation` nicht, das an der Wurzel liegt.
+`segmentation` nicht, das seit dem 09.08.2026 unter `serving/` liegt.
 
 Wer diese Datei importiert, hat danach beides. Das ist der Grund, warum beim
 Umsortieren KEINE einzige bestehende Import-Zeile geaendert werden musste:
@@ -19,7 +19,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _p in (_ROOT, _ROOT / "rsna" / "pipeline", _ROOT / "rsna" / "befunde"):
+for _p in (_ROOT, _ROOT / "rsna" / "pipeline", _ROOT / "rsna" / "befunde", _ROOT / "serving"):
     _s = str(_p)
     if _s not in sys.path:
         sys.path.insert(0, _s)

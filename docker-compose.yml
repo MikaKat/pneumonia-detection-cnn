@@ -10,15 +10,27 @@ services:
       dockerfile: serving/Dockerfile
     restart: unless-stopped
     environment:
-      THRESHOLD: "0.5"
+      # KEIN THRESHOLD. Bis zum 09.08.2026 stand hier "0.5". Am selben Tag wurde
+      # die gleichlautende Zeile aus serving/Dockerfile entfernt, diese hier
+      # aber uebersehen, und sie haette den Fehler unveraendert weitergefuehrt:
+      # compose setzt die Variable im Container, egal was im Abbild steht. Die
+      # Schwelle kommt aus serving/model/kalibrierung_p10.json und aus keiner
+      # Umgebungsvariablen; main.py bricht ab, wenn diese Zeile wiederkommt.
       RATE_LIMIT: "10"        # max. Analysen pro Client
       RATE_WINDOW: "3600"     # pro Stunde
     # RAM-Deckel, damit das Modell den kleinen Server nicht sprengt.
     # (Braucht Compose v2 / "docker compose"; bei älterem Compose s. Guide.)
+    #
+    # ACHTUNG, seit dem Umbau auf das Ensemble: geladen werden FUENF ResNet18
+    # statt einem. Die Gewichte belegen rund 224 MB auf der Platte und als
+    # float32-Parameter noch einmal rund 224 MB im Arbeitsspeicher, dazu
+    # kommen fuenf Grad-CAM-Objekte mit ihren Zwischenspeichern. 900 MB waren
+    # fuer ein Modell reichlich und sind fuer fuenf knapp. Wenn der Container
+    # ohne Meldung stirbt (OOM-Kill), ist es diese Zeile und nicht der Code.
     deploy:
       resources:
         limits:
-          memory: 900M
+          memory: 1600M
 
   web:
     build:
