@@ -100,6 +100,62 @@ def test_pad_wirkt_je_seite() -> None:
     check("padded window larger than unpadded", side > ohne, f"{side:.3f} > {ohne:.3f}")
 
 
+def test_feste_seitenlaenge() -> None:
+    print("\nfixed side length: size constant, position from the mask")
+    # Three very differently sized lungs. Only the position may differ.
+    bbs = [(0.30, 0.30, 0.50, 0.50),       # small
+           (0.05, 0.05, 0.95, 0.95),       # nearly the whole image
+           (0.10, 0.60, 0.40, 0.90)]       # small and off to one side
+    seiten = [mc.square_crop(bb, pad=0.05, fixed_side=0.80)[2] for bb in bbs]
+    check("every window is 0.80 wide", all(close(s, 0.80) for s in seiten),
+          str(seiten))
+    check("spread of the side length is exactly zero",
+          max(seiten) - min(seiten) == 0.0)
+
+    # pad may not change the size any more, otherwise it re-enters through the
+    # back door: pad acts on the bounding box, and the bounding box varies.
+    a = mc.square_crop(bbs[0], pad=0.00, fixed_side=0.80)
+    b = mc.square_crop(bbs[0], pad=0.30, fixed_side=0.80)
+    check("pad has no effect on a fixed side", close(a[2], b[2]))
+
+    # The centre still comes from the mask, so the position does vary. That is
+    # the residual channel of 0.554 and it is intentional.
+    links = [mc.square_crop(bb, pad=0.05, fixed_side=0.80)[1] for bb in bbs]
+    check("position still follows the mask", len(set(links)) > 1, str(links))
+
+    # A window that hangs outside is shifted, never shrunk.
+    top, left, side = mc.square_crop((0.00, 0.00, 0.10, 0.10), pad=0.0,
+                                     fixed_side=0.80)
+    check("window at the edge keeps its size", close(side, 0.80), str(side))
+    check("and is shifted inwards", close(top, 0.0) and close(left, 0.0))
+    check("stays inside the image", top + side <= 1.0 + 1e-12
+          and left + side <= 1.0 + 1e-12)
+
+    # Constant downward offset.
+    ohne = mc.square_crop((0.30, 0.30, 0.50, 0.50), pad=0.0, fixed_side=0.50)
+    mit = mc.square_crop((0.30, 0.30, 0.50, 0.50), pad=0.0, fixed_side=0.50,
+                         shift_y=0.03)
+    check("shift-y moves the window down by exactly that amount",
+          close(mit[0] - ohne[0], 0.03), f"{mit[0]:.4f} vs {ohne[0]:.4f}")
+    check("shift-y leaves the size alone", close(mit[2], ohne[2]))
+    check("shift-y leaves the horizontal position alone",
+          close(mit[1], ohne[1]))
+
+    # The fallback without a mask has to be the same size, not the full image.
+    fb = mc.centred_crop(0.80, 0.03)
+    check("fallback keeps the fixed size", close(fb[2], 0.80), str(fb[2]))
+    check("fallback is centred horizontally", close(fb[1], 0.10), str(fb[1]))
+    check("fallback is shifted downwards", close(fb[0], 0.13), str(fb[0]))
+    rand = mc.centred_crop(0.98, 0.30)
+    check("fallback stays inside the image even with a large offset",
+          close(rand[0], 0.02), str(rand[0]))
+
+    # Without the flag nothing changes.
+    alt = mc.square_crop((0.40, 0.20, 0.60, 0.80), pad=0.0)
+    neu = mc.square_crop((0.40, 0.20, 0.60, 0.80), pad=0.0, fixed_side=None)
+    check("default behaviour unchanged", alt == neu, f"{alt} vs {neu}")
+
+
 def test_transform_boxes() -> None:
     print("\nboxes are carried into the crop")
     S = mc.BOX_SPACE
@@ -176,6 +232,98 @@ def test_report() -> None:
     check("zoom is 1/side length", close(r["zoom_median"], 1 / 0.8),
           str(r["zoom_median"]))
     check("empty input gives an empty report", mc.crop_report([]) == {})
+
+
+def test_konstante_seite_meldet_exakt_null() -> None:
+    """The smoke test of the fixed side, pinned so it cannot come back.
+
+    Found on 07.08.2026 while preparing phase 7. The module header promised
+    that `side_sd` reads EXACTLY 0.0 under `--fixed-side`. It does not: over
+    22872 identical values of 0.800 the standard deviation runs through mean
+    and squares and comes out at 1.11e-16. Printed with six decimals that reads
+    "0.000000" and looks perfect, while `side_sd == 0.0` is False, so the
+    confirming line never appeared. A watchdog keyed to that line would have
+    aborted a completely correct run after twenty minutes of cropping.
+
+    The remedy is `side_ptp`, max minus min, which on identical values is
+    exactly 0.0 with no arithmetic in between. Both numbers are checked here:
+    the new one for being exact, the old one for still being NEAR zero, since
+    it stays in the report.
+    """
+    print("\nconstant side length: the report has to say so")
+    rows = [{"patientId": str(i), "ok": True, "side": 0.80,
+             "box_frac": np.nan} for i in range(2000)]
+    r = mc.crop_report(rows)
+    check("side_ptp is exactly zero", r["side_ptp"] == 0.0, repr(r["side_ptp"]))
+    check("side_sd is only near zero, which is the whole point",
+          abs(r["side_sd"]) < 1e-9, repr(r["side_sd"]))
+
+    import io
+    from contextlib import redirect_stdout
+    puffer = io.StringIO()
+    with redirect_stdout(puffer):
+        mc.print_report(r)
+    text = puffer.getvalue()
+    check("the report confirms the constant window size",
+          "CONSTANT WINDOW SIZE" in text, text.strip().splitlines()[-1][:60])
+
+    # And the counterpart: an adaptive window must NOT get that line, otherwise
+    # the watchdog would wave through exactly the variant that failed on 26.07.
+    rows2 = [{"patientId": str(i), "ok": True, "side": 0.70 + 0.0001 * i,
+              "box_frac": np.nan} for i in range(2000)]
+    r2 = mc.crop_report(rows2)
+    puffer2 = io.StringIO()
+    with redirect_stdout(puffer2):
+        mc.print_report(r2)
+    check("an adaptive window does NOT get that line",
+          "CONSTANT WINDOW SIZE" not in puffer2.getvalue(),
+          f"side_ptp {r2['side_ptp']:.4f}")
+
+
+def test_masken_folgen_demselben_fenster() -> None:
+    """`rsna_crop_masks.crop_one`, the lung masks in the frame of the crop.
+
+    Two things can go wrong here and neither shows up in a number: the mask
+    could be cut with a different window than the image, and it could stop
+    being binary. `load_lung` reads it back as `m > 127`, so a smoothing
+    interpolation would let the threshold decide where the lung ends instead
+    of the segmentation.
+    """
+    print("\nlung masks follow the same window")
+    import rsna_crop_masks as cm
+
+    # A 224 mask with a marked square, cut with a window whose corners are
+    # computed by hand: side 0.80, top/left 0.10 -> pixels 22.4 -> 22, side 179.
+    m = np.zeros((224, 224), np.uint8)
+    m[100:150, 100:150] = 255
+    neu = cm.crop_one(m, 0.10, 0.10, 0.80, 224)
+    check("output has the requested size", neu.shape == (224, 224),
+          str(neu.shape))
+    check("the mask stays binary", set(np.unique(neu)) <= {0, 255},
+          str(sorted(set(np.unique(neu).tolist()))[:5]))
+    # 50 of 179 pixels marked, scaled to 224: about 62.6 pixels on a side.
+    n = int((neu == 255).sum())
+    erw = (50 / 179 * 224) ** 2
+    check("marked area scales with the window",
+          abs(n - erw) / erw < 0.05, f"{n} against {erw:.0f}")
+
+    # A window at the edge is pushed inwards, never shrunk. Same rule as
+    # square_crop, and it has to be the same rule or masks and images part ways.
+    rand = cm.crop_one(m, 0.95, 0.95, 0.80, 224)
+    check("window at the edge keeps its size", rand.shape == (224, 224))
+
+    # The full window changes nothing but the resampling.
+    ganz = cm.crop_one(m, 0.0, 0.0, 1.0, 224)
+    check("the full window returns the mask unchanged",
+          bool((ganz == m).all()))
+
+    # Retention is an area ratio in ONE unit. Dividing the two frame fractions
+    # would report 1/side^2 on every mask, which is the zoom, not a loss.
+    vorher = float((m > 127).mean())
+    im_zuschnitt = float((neu > 127).mean())
+    erhalt = im_zuschnitt * 0.80 * 0.80 / vorher
+    check("retention of an uncut mask is 1.0", abs(erhalt - 1.0) < 0.05,
+          f"{erhalt:.4f}")
 
 
 def test_labels_format() -> None:
@@ -311,8 +459,12 @@ def test_ende_zu_ende() -> None:
 if __name__ == "__main__":
     for fn in (test_mask_bbox, test_square_crop_ist_quadratisch,
                test_square_crop_verschiebt_statt_zu_schrumpfen,
-               test_pad_wirkt_je_seite, test_transform_boxes,
-               test_erhalt_ist_ein_anteil, test_report, test_labels_format,
+               test_pad_wirkt_je_seite, test_feste_seitenlaenge,
+               test_transform_boxes,
+               test_erhalt_ist_ein_anteil, test_report,
+               test_konstante_seite_meldet_exakt_null,
+               test_masken_folgen_demselben_fenster,
+               test_labels_format,
                test_ende_zu_ende):
         fn()
     print("\n" + ("-" * 60))

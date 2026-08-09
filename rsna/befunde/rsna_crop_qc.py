@@ -178,7 +178,21 @@ def draw(params: Path, images: Path, cache: Path, csv_dir: Path, out: Path,
     hist.set_ylabel("images")
     hist.legend()
 
-    title = ("fixed side length %.2f" % fixed_side if fixed_side
+    # The caption describes what was DRAWN, not what the caller passed.
+    #
+    # It used to read `fixed_side if fixed_side else "adaptive"`, which takes
+    # the caption from a switch rather than from the data. Called with
+    # `--params crop_params_fix080.csv` and no `--fixed-side`, the picture
+    # showed a perfectly constant window and was titled "adaptive crop, side
+    # fitted per image": the variant this project measured and rejected. Months
+    # later, or in a portfolio, nothing in the file would correct that.
+    #
+    # Same lesson as `side_sd` in rsna_make_crops.py, and the same remedy: the
+    # spread comes from max minus min, so a constant side gives exactly 0.0
+    # with no floating point noise in between.
+    seiten = np.array([window(r, fixed_side)[2] for _, r in d.iterrows()])
+    fest = float(seiten.max() - seiten.min()) == 0.0
+    title = (f"fixed side length {float(seiten[0]):.2f}" if fest
              else "adaptive crop, side fitted per image")
     fig.suptitle(f"Lung crop, {title}. Cyan: lung mask. Orange: crop window. "
                  f"Red: annotated box.", fontsize=11)

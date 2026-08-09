@@ -25,6 +25,53 @@ Three decisions sit in that sentence, each resting on an earlier measurement.
   position in the image, and the position is itself a projection proxy. That
   is the same error through the back door.
 
+The adaptive window and its measured failure
+--------------------------------------------
+The default above derives the side length from the lung bounding box, and that
+is what the first crop training run used. It failed on the pre-registered
+endpoint: AUC(score -> ViewPosition) ROSE in all five folds, mean +0.027, while
+the stratified AUC did not move (+0.003). The mechanism was measured afterwards
+in `qc/crop_varianten_tabelle.csv`: the window side length alone predicts AP/PA
+at AUC 0.685, against 0.714 for the whole framing. An adaptive crop therefore
+takes almost the entire channel it is meant to close and writes it back into
+the image as a global zoom factor, at a median 1.197x for AP against 1.117x for
+PA. Texture frequency is easier for a convolutional net to read than framing,
+so the crop made the confounder worse rather than better.
+
+`--fixed-side`: the only neutral crop form
+------------------------------------------
+The same measurement pointed at the remedy. With the side length held CONSTANT
+and only the position taken from the mask, the geometry channel falls from
+0.714 to 0.554, and 0.554 is position alone. Retained box area at side 0.80 is
+0.996; below 0.75 the box retention breaks down. 0.80 is therefore the value
+with a safety margin, 0.75 the aggressive case.
+
+Two consequences that are easy to get wrong:
+
+  A MISSING MASK MUST NOT MEAN AN UNCROPPED IMAGE. With the adaptive window,
+  falling back to the full image is merely one more size among many. With a
+  fixed side it would be the ONLY image at a different zoom, which is exactly
+  the per-image size difference the fixed side exists to remove. Under
+  `--fixed-side` the fallback is therefore a CENTRED window of the same side
+  length, and `ok=False` still records it.
+
+  `--shift-y` IS CONSTANT ON PURPOSE. The lost box area sits at the bottom
+  (0.65 % against 0.09 % at the top at side 0.75): the mask underestimates the
+  diaphragm, so the costophrenic angles are cut first. A constant downward
+  offset recovers part of that and can carry no per-image information, because
+  it is identical for every image. An offset derived from the mask could not
+  make that promise.
+
+The smoke test for a fixed side is `side_ptp` in the report, the spread max
+minus min. It has to be EXACTLY 0.0. Anything else means some path still
+derives the side length from the image, and then the run measures the adaptive
+window again under a new name.
+
+Until 07.08.2026 this sentence said `side_sd`, and that was wrong in a way that
+only bites when everything else is right: a standard deviation over identical
+values is 1.11e-16 rather than 0.0, so the confirming line never printed while
+the printed number read 0.000000. See `crop_report`.
+
 PRECOMPUTE, NOT AT RUNTIME. Cropping during training would mean loading the
 mask for every image on every pass over the data. Under DirectML the DataLoader
 runs with `--workers 0`, so that would be the bottleneck.
@@ -57,6 +104,12 @@ CLI:
   # later, for the one-off holdout evaluation
   python rsna_make_crops.py --ids-from qc/holdout_ids.csv \
       --raw-cache data/rsna/unet_raw256.npz --out data/rsna/crop512
+
+  # the neutral variant: constant size, position from the mask
+  python rsna_make_crops.py --ids-from qc/dev_ids.csv \
+      --raw-cache data/rsna/unet_raw256.npz \
+      --out data/rsna/crop512_fix080 --fixed-side 0.80 --shift-y 0.03 \
+      --params-out predictions_rsna/crop_params_fix080.csv
 
   # then train:
   python rsna_train.py --fold 0 --images data/rsna/crop512 \
@@ -95,8 +148,22 @@ def mask_bbox(mask: np.ndarray) -> tuple[float, float, float, float] | None:
     return (ys.min() / H, xs.min() / W, (ys.max() + 1) / H, (xs.max() + 1) / W)
 
 
+def centred_crop(side: float, shift_y: float = 0.0
+                 ) -> tuple[float, float, float]:
+    """The fallback window when no mask is available and the side is fixed.
+
+    Centred, same side length as every other image. See the module header for
+    why the uncropped full image is the wrong fallback in that case.
+    """
+    side = min(max(side, 0.0), 1.0)
+    top = min(max((1.0 - side) / 2 + shift_y, 0.0), 1.0 - side)
+    return top, (1.0 - side) / 2, side
+
+
 def square_crop(bbox: tuple[float, float, float, float],
-                pad: float = 0.05) -> tuple[float, float, float]:
+                pad: float = 0.05,
+                fixed_side: float | None = None,
+                shift_y: float = 0.0) -> tuple[float, float, float]:
     """Turn the rectangle into a square crop window.
 
     Everything in [0,1]; the source image is square (512x512 from
@@ -109,14 +176,22 @@ def square_crop(bbox: tuple[float, float, float, float],
     first and adding one common margin afterwards would tie the margin width to
     the longer side, and on supine images the longer side is a different one
     than on upright ones.
+
+    With `fixed_side` the side length is NOT derived from the rectangle. Only
+    the centre is, and `pad` then has no effect at all, because a margin around
+    a window of constant size cannot change its size. `shift_y` moves the
+    window down by a constant fraction of the image; positive is downwards.
     """
     t, l, b, r = bbox
     h, w = b - t, r - l
     t, b = t - pad * h, b + pad * h
     l, r = l - pad * w, r + pad * w
 
-    side = min(max(b - t, r - l), 1.0)          # never larger than the image
-    cy, cx = (t + b) / 2, (l + r) / 2
+    if fixed_side is None:
+        side = min(max(b - t, r - l), 1.0)      # never larger than the image
+    else:
+        side = min(max(fixed_side, 0.0), 1.0)
+    cy, cx = (t + b) / 2 + shift_y, (l + r) / 2
     top, left = cy - side / 2, cx - side / 2
 
     # Shift inwards instead of shrinking; see the module header.
@@ -176,6 +251,21 @@ def crop_report(rows: list[dict]) -> dict:
         "n": len(d),
         "n_leer": int((~d["ok"]).sum()),
         "side_median": float(d["side"].median()),
+        # The smoke test for --fixed-side, and it is `side_ptp`, not `side_sd`.
+        #
+        # `side_sd` runs over mean and squares, so on 22872 identical values of
+        # 0.800 it does not come out as 0.0 but as 1.11e-16. Printed with six
+        # decimals that reads "0.000000" and looks perfect, while
+        # `side_sd == 0.0` is False and the confirming line in `print_report`
+        # never appears. A watchdog keyed to that line would abort a completely
+        # correct run: the same class of mistake as the culture bug in the
+        # phase 6 runner, only the other way round.
+        #
+        # The spread max minus min carries no such noise. On identical values
+        # it is exactly 0.0, which is what the module header has meant all
+        # along. `side_sd` stays in the report unchanged, nothing is dropped.
+        "side_sd": float(d["side"].std(ddof=0)),
+        "side_ptp": float(d["side"].max() - d["side"].min()),
         "zoom_median": float((1.0 / d["side"]).median()),
         "flaeche_median": float((d["side"] ** 2).median()),
     }
@@ -203,6 +293,13 @@ def print_report(rep: dict) -> None:
           f"(Median)")
     print(f"  area                        {rep['flaeche_median']:.3f}  "
           f"| linear zoom {rep['zoom_median']:.2f}x")
+    print(f"  spread of the side length   {rep['side_ptp']:.6f}  "
+          f"(max minus min; with --fixed-side this has to be 0.000000)")
+    print(f"    standard deviation        {rep['side_sd']:.3e}  "
+          f"(floating point noise on a constant, see crop_report)")
+    if rep["side_ptp"] == 0.0:
+        print("  -> CONSTANT WINDOW SIZE, the zoom carries no per-image "
+              "information.")
     if "n_mit_box" in rep:
         print(f"\n  --- What the crop takes away from the pathology ---")
         print(f"  images with a box           {rep['n_mit_box']}")
@@ -245,7 +342,8 @@ def boxes_by_id(df: pd.DataFrame) -> dict[str, list[tuple[float, float, float, f
 
 def run(ids: list[str], images: Path, out_dir: Path, cache: Path,
         refine: str, dilate_px: int, pad: float, size: int,
-        csv_dir: Path, overwrite: bool) -> list[dict]:
+        csv_dir: Path, overwrite: bool,
+        fixed_side: float | None = None, shift_y: float = 0.0) -> list[dict]:
     """Crop each image, write it out and record what the crop did to it."""
     import cv2
     from PIL import Image
@@ -281,7 +379,14 @@ def run(ids: list[str], images: Path, out_dir: Path, cache: Path,
             ohne_maske += 1
             bb = None
         ok = bb is not None
-        crop = square_crop(bb, pad) if ok else (0.0, 0.0, 1.0)
+        if ok:
+            crop = square_crop(bb, pad, fixed_side, shift_y)
+        elif fixed_side is None:
+            crop = (0.0, 0.0, 1.0)
+        else:
+            # Not the full image: that would be the only differently sized
+            # window in the set. See the module header.
+            crop = centred_crop(fixed_side, shift_y)
 
         if overwrite or not dst.exists():
             img = np.array(Image.open(src).convert("L"))
@@ -306,6 +411,12 @@ def run(ids: list[str], images: Path, out_dir: Path, cache: Path,
             neu, frac = transform_boxes(boxes[pid], crop)
         rows.append({"patientId": pid, "ok": ok,
                      "top": crop[0], "left": crop[1], "side": crop[2],
+                     # A constant column, and it earns its place. `top` mixes
+                     # the mask centre with the offset, so once the run is over
+                     # the offset cannot be recovered from the sum. Without
+                     # this column, `--shift-y` is the one parameter of the
+                     # crop that nothing downstream can check.
+                     "shift_y": float(shift_y),
                      "box_frac": frac if pid in boxes else np.nan,
                      "n_boxes_vorher": len(boxes.get(pid, [])),
                      "n_boxes_nachher": len(neu)})
@@ -367,6 +478,18 @@ def main(argv=None) -> int:
                    help="mask refinement, as measured in rsna_crop_geometry.py")
     p.add_argument("--dilate-px", type=int, default=8)
     p.add_argument("--pad", type=float, default=0.05)
+    p.add_argument("--fixed-side", type=float, default=None,
+                   help="hold the window size CONSTANT at this fraction of "
+                        "the image and take only the position from the mask. "
+                        "0.80 is the measured value with a safety margin, "
+                        "0.75 the aggressive one. Without this flag the "
+                        "adaptive window is used, which raised the primary "
+                        "endpoint in all five folds; see the module header.")
+    p.add_argument("--shift-y", type=float, default=0.0,
+                   help="constant downward offset of the window as a fraction "
+                        "of the image; 0.03 recovers part of the box area "
+                        "lost at the diaphragm. Constant for every image on "
+                        "purpose, so it cannot encode anything per image.")
     p.add_argument("--size", type=int, default=512,
                    help="edge length of the output; 512 matches png512, so "
                         "nothing else in rsna_train.py has to change")
@@ -375,16 +498,36 @@ def main(argv=None) -> int:
                    default=Path("predictions_rsna/crop_params.csv"))
     args = p.parse_args(argv)
 
+    if args.fixed_side is not None and not 0.0 < args.fixed_side <= 1.0:
+        print(f"ERROR: --fixed-side has to lie in (0, 1], not "
+              f"{args.fixed_side}.")
+        return 2
+    # Overwriting a parameter file silently is the same class of error as the
+    # overwritten checkpoints: the file then belongs to a different crop than
+    # the images that were evaluated with it.
+    if args.params_out.exists() and not args.overwrite:
+        print(f"ERROR: {args.params_out} already exists.")
+        print("  Choose a different --params-out for a new crop variant, or")
+        print("  pass --overwrite if this run really is meant to replace it.")
+        return 2
+
     from rsna_make_masks import ids_from_csvs
     ids = ids_from_csvs(args.ids_from)
     print(f"Images in the selection: {len(ids)}")
+    if args.fixed_side is None:
+        print("  window: ADAPTIVE (size from the mask). This is the variant "
+              "that raised the primary endpoint by 0.027.")
+    else:
+        print(f"  window: FIXED at {args.fixed_side:.3f} of the image, "
+              f"downward offset {args.shift_y:.3f}, position from the mask.")
     if not args.raw_cache.exists():
         print(f"ERROR: raw cache missing: {args.raw_cache}")
         print("  Run rsna_make_masks.py first.")
         return 2
 
     rows = run(ids, args.images, args.out, args.raw_cache, args.refine,
-               args.dilate_px, args.pad, args.size, args.csv, args.overwrite)
+               args.dilate_px, args.pad, args.size, args.csv, args.overwrite,
+               args.fixed_side, args.shift_y)
     if not rows:
         print("ERROR: nothing was cropped.")
         return 2
