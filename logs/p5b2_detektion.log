@@ -1,0 +1,60 @@
+==========================================================================
+PHASE 5b, TEIL 2: DETEKTION, IoU UND mAP
+==========================================================================
+
+0  DIE PARAMETER, ALLE AUF DEM SELEKTIONS-SPLIT BESTIMMT
+quelle endpunkt  fold  thr  min_tiles  gate_q  score_sel
+  kopf       E1     0 0.89          3    0.00   0.147756
+  kopf       E1     1 0.89          3    0.00   0.150900
+  kopf       E1     2 0.89          3    0.00   0.138787
+  kopf       E1     3 0.83          3    0.00   0.138327
+  kopf       E1     4 0.92          3    0.00   0.116419
+  kopf       E2     0 0.89          3    0.75   0.167109
+  kopf       E2     1 0.86          3    0.75   0.181966
+  kopf       E2     2 0.89          3    0.75   0.157134
+  kopf       E2     3 0.83          3    0.65   0.163030
+  kopf       E2     4 0.89          3    0.75   0.130612
+priore       E1     0 0.47          1    0.00   0.026598
+priore       E1     1 0.44          1    0.00   0.021424
+priore       E1     2 0.44          1    0.00   0.024474
+priore       E1     3 0.44          1    0.00   0.026967
+priore       E1     4 0.44          1    0.00   0.024156
+priore       E2     0 0.41          1    0.75   0.066183
+priore       E2     1 0.44          1    0.75   0.054449
+priore       E2     2 0.38          1    0.80   0.059100
+priore       E2     3 0.44          1    0.70   0.062907
+priore       E2     4 0.44          1    0.80   0.060704
+  ok    kein Parametersatz sitzt am Rand des Suchgitters   thr von 0.38 bis 0.92, Gitter 0.20 bis 0.98
+
+==========================================================================
+1  DAS WETTBEWERBSMASS AUF DER VALIDIERUNG
+==========================================================================
+
+   Quelle  Endp      f0      f1      f2      f3      f4   Mittel   nur AP   nur PA  mit Kasten
+     kopf    E1  0.1291  0.1407  0.1459  0.1411  0.1240   0.1362   0.1540   0.0861       0.400
+     kopf    E2  0.1378  0.1676  0.1655  0.1672  0.1399   0.1556   0.1806   0.0933       0.253
+   priore    E1  0.0233  0.0255  0.0237  0.0260  0.0258   0.0249   0.0474   0.0060       1.000
+   priore    E2  0.0576  0.0631  0.0581  0.0581  0.0657   0.0605   0.0758   0.0257       0.241
+
+==========================================================================
+2  DAS TOR: DER KOPF GEGEN DEN LAGEPRIORE, GEPAART JE FOLD
+==========================================================================
+
+  E1 (BESTAETIGEND): Kopf 0.1362, Lagepriore 0.0249, Differenz +0.1113 [+0.1024, +0.1202]
+  TOR BESTANDEN. Der Kopf schlaegt die Karte, die nur die uebliche Lage kennt.
+
+  E2 (erkundend): Kopf 0.1556, Lagepriore 0.0605, Differenz +0.0951 [+0.0793, +0.1109]
+
+==========================================================================
+3  WAS EINE UNGETUNTE SCHWELLE GEKOSTET HAETTE
+==========================================================================
+  Beschreibend. Schwelle 0,5, kein Tor, min_tiles 1, also der Kopf
+  so wie er aus dem Training kommt.
+
+  ungetunt: 0.0375   (Kasten auf 85.0% der Bilder)
+  getunt:   0.1362
+        Der Unterschied ist die Kalibrierung, die die Schwellenwahl auf dem
+        Selektions-Split nebenbei miterledigt, siehe Phase 5b Teil 1.
+
+==========================================================================
+Kein Befund.

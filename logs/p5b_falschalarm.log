@@ -1,0 +1,128 @@
+==========================================================================
+PHASE 5b, TEIL 1: FALSCHALARM DES KOPFES
+==========================================================================
+
+0  WAS UEBERHAUPT GEMESSEN WIRD
+klasse  Infiltrat  Mittelklasse  Normal
+fold                                   
+0            1031          2024    1519
+1            1031          2029    1515
+2            1031          2043    1500
+3            1031          2071    1473
+4            1030          2029    1515
+  ok    jede Klasse ist in jedem Fold ausreichend besetzt   kleinste Gruppe 1030
+  ok    keine unbekannte Klasse   0 Bilder ohne Klasse
+  Lungenkacheln je Bild: Median 70 von 196, Minimum 12
+
+==========================================================================
+ARM ex
+==========================================================================
+
+D3  Alarm je Klasse (Mittel), erwartete Reihenfolge Normal < Mittelklasse < Infiltrat
+               alarm  ausdehnung      n
+klasse                                 
+Normal        0.5781      0.1434   7522
+Mittelklasse  0.8301      0.3375  10196
+Infiltrat     0.9513      0.5498   5154
+  ok    ex: die Reihenfolge stimmt
+
+D1 und D2  Trennung durch den Alarm, gepaart je Fold
+  D1 Infiltrat gegen Mittelklasse    AUC 0.7998   90 % [0.7835, 0.8161]   je Fold 0.781 0.807 0.816 0.813 0.782
+  D2 Infiltrat gegen Normal          AUC 0.9691   90 % [0.9616, 0.9767]   je Fold 0.959 0.975 0.976 0.973 0.962
+     Mittelklasse gegen Normal       AUC 0.8352   90 % [0.8205, 0.8499]   je Fold 0.837 0.833 0.849 0.847 0.810
+
+  je Projektion, und die geschichtete Zahl daneben
+    nur AP: D1 = 0.7774   n 9053   je Fold 0.757 0.776 0.803 0.796 0.755
+    nur PA: D1 = 0.7528   n 6297   je Fold 0.721 0.792 0.754 0.767 0.731
+    GESCHICHTET: 0.7673   90 % [0.7466, 0.7879]   gepoolt 0.7998
+        Die gepoolte Zahl liegt +0.0325 ueber der geschichteten. Berichtet wird die
+        geschichtete, alles andere waere der Fehler aus Phase 3.
+
+  DAS TOR
+  BESTANDEN. Das Intervall liegt ganz ueber 0,5. Der Kopf unterscheidet
+  Pneumonie von anderer Auffaelligkeit, er ist kein reiner Verschattungsmelder.
+
+==========================================================================
+ARM em
+==========================================================================
+
+D3  Alarm je Klasse (Mittel), erwartete Reihenfolge Normal < Mittelklasse < Infiltrat
+               alarm  ausdehnung      n
+klasse                                 
+Normal        0.2776      0.0660   7522
+Mittelklasse  0.7092      0.2881  10196
+Infiltrat     0.9163      0.5529   5154
+  ok    em: die Reihenfolge stimmt
+
+D1 und D2  Trennung durch den Alarm, gepaart je Fold
+  D1 Infiltrat gegen Mittelklasse    AUC 0.7951   90 % [0.7788, 0.8115]   je Fold 0.773 0.817 0.801 0.802 0.783
+  D2 Infiltrat gegen Normal          AUC 0.9747   90 % [0.9682, 0.9812]   je Fold 0.968 0.983 0.982 0.971 0.970
+     Mittelklasse gegen Normal       AUC 0.8663   90 % [0.8482, 0.8844]   je Fold 0.867 0.888 0.880 0.857 0.840
+
+  je Projektion, und die geschichtete Zahl daneben
+    nur AP: D1 = 0.7842   n 9053   je Fold 0.758 0.802 0.802 0.792 0.767
+    nur PA: D1 = 0.7380   n 6297   je Fold 0.721 0.789 0.726 0.735 0.720
+    GESCHICHTET: 0.7653   90 % [0.7448, 0.7857]   gepoolt 0.7951
+        Die gepoolte Zahl liegt +0.0299 ueber der geschichteten. Berichtet wird die
+        geschichtete, alles andere waere der Fehler aus Phase 3.
+
+  DAS TOR
+  BESTANDEN. Das Intervall liegt ganz ueber 0,5. Der Kopf unterscheidet
+  Pneumonie von anderer Auffaelligkeit, er ist kein reiner Verschattungsmelder.
+
+==========================================================================
+D4  DIE BEZUGSLINIE: DER KLASSIFIKATOR AUF DENSELBEN BILDERN
+==========================================================================
+  Beschreibend, ohne Urteil: fuer diesen Vergleich wurde nie eine
+  Marge vorfestgelegt, und eine jetzt zu erfinden waere ein nachtraegliches Tor.
+
+  ex, Klassifikatorwert:  Infiltrat gegen Mittelklasse 0.7832,  gegen Normal 0.9657
+      Kopf minus Klassifikator auf D1: +0.0166 [+0.0078, +0.0254]   (Kopf 0.7998)
+  em, Klassifikatorwert:  Infiltrat gegen Mittelklasse 0.7854,  gegen Normal 0.9706
+      Kopf minus Klassifikator auf D1: +0.0097 [+0.0043, +0.0151]   (Kopf 0.7951)
+
+==========================================================================
+D5  EXCLUDE GEGEN EMPTY AUF D1, gepaart je Fold
+==========================================================================
+  Die Zahl, die sagt, ob der alpha-Regler gebaut werden muss.
+  ex 0.7998   em 0.7951   Differenz +0.0047 [-0.0049, +0.0142]
+  Nicht getrennt. Das heisst NICHT 'kein Unterschied', sondern
+  'zu ungenau gemessen': Halbbreite 0.0095 bei fuenf Folds.
+
+==========================================================================
+D6  LIEGT DER AUSSCHLAG UEBERHAUPT IM LUNGENFELD
+==========================================================================
+  Die Frage, die Phase 3 offen lassen musste, weil sie Grad-CAM auf
+  negativen Bildern gebraucht haette.
+
+  ex Normal        Gipfel in der Lunge bei 0.904 der Bilder   (Alarm Lunge 0.5781, ganzes Bild 0.5846)
+  ex Mittelklasse  Gipfel in der Lunge bei 0.902 der Bilder   (Alarm Lunge 0.8301, ganzes Bild 0.8350)
+  ex Infiltrat     Gipfel in der Lunge bei 0.959 der Bilder   (Alarm Lunge 0.9513, ganzes Bild 0.9527)
+  em Normal        Gipfel in der Lunge bei 0.764 der Bilder   (Alarm Lunge 0.2776, ganzes Bild 0.3068)
+  em Mittelklasse  Gipfel in der Lunge bei 0.847 der Bilder   (Alarm Lunge 0.7092, ganzes Bild 0.7237)
+  em Infiltrat     Gipfel in der Lunge bei 0.931 der Bilder   (Alarm Lunge 0.9163, ganzes Bild 0.9195)
+
+==========================================================================
+D7  WIE LAUT IST DER KOPF ABSOLUT
+==========================================================================
+  NICHT vorfestgelegt, beschreibend. AUC ist eine Rangzahl und sagt
+  ueber die Hoehe nichts. Sobald irgendwo eine feste Schwelle auf das
+  Kopffeld gelegt wird, und Phase 5b Teil 2 braucht genau das, zaehlt
+  aber die Hoehe. Anteil der Bilder mit einem Alarm ueber der Schwelle:
+
+  Arm  Schwelle    Normal  Mittelklasse  Infiltrat
+   ex      0.50     0.624         0.928      0.992
+   ex      0.80     0.179         0.693      0.949
+   ex      0.90     0.053         0.501      0.880
+   em      0.50     0.190         0.758      0.963
+   em      0.80     0.053         0.534      0.883
+   em      0.90     0.015         0.368      0.793
+
+        Dieselbe Form wie in Phase 3: die Rangfolge stimmt, die Hoehe nicht.
+        Dort war die Antwort Platt auf dem Selektions-Split und nicht ein
+        neues Training, und dieselbe Antwort liegt hier naeher als der
+        alpha-Regler, solange D5 die beiden Arme nicht trennt.
+
+==========================================================================
+1 BEFUND(E):
+  - nicht vorfestgelegt, aber unuebersehbar: bei Schwelle 0,5 alarmiert der Kopf auf 62.4% der NORMALEN Bilder in `exclude` und auf 19.0% in `empty`

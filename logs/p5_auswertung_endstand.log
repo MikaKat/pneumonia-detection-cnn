@@ -1,0 +1,178 @@
+        scipy not installed, the t quantile was not compared
+==========================================================================
+PHASE 5, THE SECOND HEAD
+==========================================================================
+
+0  WHERE DO THE ROWS SAY THEY COME FROM
+  ok    all three arms are present   ['em', 'ex', 'ref']
+  ok    ref: five folds   folds [0, 1, 2, 3, 4], 5 row(s)
+  ok    ex: five folds   folds [0, 1, 2, 3, 4], 6 row(s)
+  ok    em: five folds   folds [0, 1, 2, 3, 4], 5 row(s)
+
+  NOTE  a fold was run more than once:
+    ex fold 1: 2 rows, lambda 7.505e+07, 0.6183
+        The LAST of them is used, because it wrote the prediction
+        files. The earlier one stays in the CSV as a record.
+  ok    every row ran on adapter 1   dml_index [1]
+  ok    every row names the card
+  ok    every row decoupled projection and label   balance_residual_auc deviates from 0.500 by at most 1.1e-16
+  ok    every row writes into its own directory
+  ok    no two rows share a checkpoint file
+  ok    both head arms trained a 14 by 14 head
+  ok    the reference arm trained no head
+  ok    lambda stayed within a plausible range in every fold
+
+  lambda was measured after batch 1 in:
+    ex fold 1: batch 2
+        The first batch carried no annotated image and the
+        measurement waited for one. Batches before it give the head
+        no gradient, so nothing else about the fold changes.
+
+  lambda per fold:
+    ex fold 0: 0.9688
+    ex fold 2: 1.269
+    ex fold 3: 0.9473
+    ex fold 4: 1.18
+    em fold 0: 0.9562
+    em fold 1: 1.071
+    em fold 2: 1.257
+    em fold 3: 0.7082
+    em fold 4: 0.8443
+    ex fold 1: 0.6183
+
+==========================================================================
+1  B: THE HEAD FIELD AGAINST THE LOCATION PRIOR
+==========================================================================
+  Point AUC inside the lung mask, paired per image, 95 % bootstrap.
+  B selects the arm for A. It is not an endpoint: a model trained to
+  point points better, which is a definition.
+
+   arm      group      n     head    prior      lead          95 % interval
+    ex     pooled   5146   0.9123   0.7520   +0.1603 [ +0.1562,  +0.1643]
+    ex    only AP   3991   0.9079   0.7432   +0.1647 [ +0.1600,  +0.1695]
+    ex    only PA   1155   0.9276   0.7827   +0.1450 [ +0.1364,  +0.1537]
+    ex     fold 0   1029   0.9090   0.7504   +0.1585 [ +0.1494,  +0.1683]
+    ex     fold 1   1028   0.9146   0.7558   +0.1588 [ +0.1496,  +0.1675]
+    ex     fold 2   1030   0.9131   0.7443   +0.1688 [ +0.1595,  +0.1780]
+    ex     fold 3   1029   0.9173   0.7528   +0.1645 [ +0.1551,  +0.1739]
+    ex     fold 4   1030   0.9075   0.7568   +0.1508 [ +0.1415,  +0.1601]
+    em     pooled   5146   0.8996   0.7520   +0.1476 [ +0.1432,  +0.1520]
+    em    only AP   3991   0.8941   0.7432   +0.1510 [ +0.1460,  +0.1561]
+    em    only PA   1155   0.9185   0.7827   +0.1358 [ +0.1266,  +0.1452]
+    em     fold 0   1029   0.9056   0.7504   +0.1552 [ +0.1453,  +0.1654]
+    em     fold 1   1028   0.9067   0.7558   +0.1509 [ +0.1412,  +0.1603]
+    em     fold 2   1030   0.8992   0.7443   +0.1549 [ +0.1445,  +0.1651]
+    em     fold 3   1029   0.8943   0.7528   +0.1414 [ +0.1310,  +0.1519]
+    em     fold 4   1030   0.8922   0.7568   +0.1355 [ +0.1252,  +0.1458]
+
+  ok    both arms beat the prior, pooled and in each projection
+
+  exclude against empty, paired per image
+    per image: n 5146, difference in the lead +0.0127 [+0.0110, +0.0145]
+    per fold:  n 5, difference +0.0127 [+0.0055, +0.0199] (90 %)
+    lead per fold: f0 ex +0.1585 em +0.1552, f1 ex +0.1588 em +0.1509, f2 ex +0.1688 em +0.1549, f3 ex +0.1645 em +0.1414, f4 ex +0.1508 em +0.1355
+
+  WINNER OF B: ex
+
+==========================================================================
+2  A: WHAT THE HEAD COSTS THE CLASSIFIER
+==========================================================================
+
+  fold      ref       ex       em  ex - ref  em - ref
+     0   0.8088   0.8211   0.8222   +0.0123   +0.0134
+     1   0.8383   0.8426   0.8508   +0.0044   +0.0126
+     2   0.8325   0.8479   0.8405   +0.0154   +0.0080
+     3   0.8429   0.8407   0.8487   -0.0023   +0.0058
+     4   0.8208   0.8316   0.8308   +0.0109   +0.0100
+  mean   0.8287   0.8368   0.8386   +0.0081   +0.0100
+
+  the same, per projection
+     AP only: ref 0.8185  ex 0.8253 (+0.0068)  em 0.8281 (+0.0096)
+     PA only: ref 0.8372  ex 0.8465 (+0.0092)  em 0.8475 (+0.0103)
+
+  CONFIRMATORY, the winner of B against the reference arm:
+  A, ex - ref: mean difference +0.0081, sd 0.0071, 90 % interval [+0.0014, +0.0149], margin 0.010
+  A, ex - ref: NON-INFERIORITY PASS   (equivalence would read UNCLEAR)
+        The interval sits entirely above zero, so the head did not cost
+        anything on this endpoint, it gained. Superiority was NOT
+        pre-registered, so this is a lead to confirm, not a result.
+        The equivalence reading is UNCLEAR only because the upper end
+        exceeds the margin, which is the good direction. The
+        pre-registration asks one question: does A fall by more than the
+        margin. It does not.
+
+  EXPLORATORY, the loser of B:
+  A, em - ref: mean difference +0.0100, sd 0.0032, 90 % interval [+0.0069, +0.0130], margin 0.010
+  A, em - ref: NON-INFERIORITY PASS   (equivalence would read UNCLEAR)
+        The interval sits entirely above zero, so the head did not cost
+        anything on this endpoint, it gained. Superiority was NOT
+        pre-registered, so this is a lead to confirm, not a result.
+        The equivalence reading is UNCLEAR only because the upper end
+        exceeds the margin, which is the good direction. The
+        pre-registration asks one question: does A fall by more than the
+        margin. It does not.
+
+  C, AUC(score -> ViewPosition), exploratory
+  fold      ref       ex       em
+     0   0.7174   0.7418   0.7390
+     1   0.7699   0.7759   0.7725
+     2   0.7373   0.7547   0.7524
+     3   0.7183   0.7229   0.7225
+     4   0.7601   0.7382   0.7414
+  mean   0.7406   0.7467   0.7455
+  C, ex - ref: mean difference +0.0061, sd 0.0177, 90 % interval [-0.0108, +0.0229], margin 0.020
+  C, ex - ref: EQUIVALENCE UNCLEAR, 'C did not rise beyond the margin' NOT established
+        The upper end of the interval sits above the margin, so a rise
+        of C larger than the project would act on cannot be ruled out.
+        C is exploratory here, so this decides nothing, but it is the
+        direction that would matter and it is not clean.
+  C, em - ref: mean difference +0.0049, sd 0.0154, 90 % interval [-0.0097, +0.0196], margin 0.020
+  C, em - ref: EQUIVALENCE PASS, 'C did not rise beyond the margin' holds
+
+==========================================================================
+3  THREE MAPS, EACH BESIDE THE LOCATION PRIOR
+==========================================================================
+
+  location prior, point AUC in the lung: 0.7520
+
+  a) head output, point AUC in the lung
+     ex: 0.9123  (AP 0.9079, PA 0.9276)
+     em: 0.8996  (AP 0.8941, PA 0.9185)
+
+  b) Grad-CAM, hit rate and mass against the chance level
+      arm      n      hit   chance     lift     mass     lift  degenerate
+      ref   1500   0.4253   0.1167  +0.3087   0.1868  +0.0701          32
+       ex   1500   0.6007   0.1167  +0.4840   0.2120  +0.0953          30
+       em   1500   0.6253   0.1167  +0.5087   0.2128  +0.0962          78
+  FAIL  no arm produces markedly more degenerate Grad-CAM maps   em has 78 of 1500, median over the arms 32
+        hit and mass are the numbers the training run already writes. They
+        are not point AUC and they are not comparable with row a), because
+        their chance level moves with the box area. The point AUC row for
+        Grad-CAM needs the maps themselves and therefore a rerun:
+          python rsna\befunde\rsna_cam_power.py --arms p5ref p5head_ex p5head_em
+        Until then the middle row of the three map table is missing and the
+        comparison emergent against trained rests on hit and mass alone.
+
+  c) for context, phase 2 measured single headed Grad-CAM with
+     point AUC on the same images (adapter 0, other run):
+             base: 0.7039
+            bal10: 0.6596
+       Lagepriore: 0.7520
+        Not paired with anything in phase 5. It stands here because it is
+        the only existing point AUC of a Grad-CAM map in this project,
+        and because it is the central phase 2 result: Grad-CAM sits BELOW
+        the location prior on average, the head sits far above it.
+
+==========================================================================
+4  CROSS CHECK
+==========================================================================
+  ok    A, stratified AUC recomputed from the prediction files   largest deviation 1.11e-16
+  ok    C, score -> view recomputed from the prediction files   largest deviation 1.11e-16
+  ok    raw AUC recomputed from the prediction files   largest deviation 2.22e-16
+  ok    point AUC identical to rsna_kopf_auswertung.py   20616 rows, largest deviation 0.00e+00
+  ok    both arms scored the same images   {'Kopf': {'em': 5154, 'ex': 5154}, 'Lagepriore': {'em': 5154, 'ex': 5154}}
+
+==========================================================================
+2 FINDING(S):
+  - C, ex - ref: a rise beyond the margin cannot be excluded
+  - no arm produces markedly more degenerate Grad-CAM maps
