@@ -248,9 +248,14 @@ shortcut worth 0.095 AUC.
 
 ## Where the data comes from
 
-Nothing here ships image data. All three sets are public and have to be
-downloaded from the source, which is also where their licences and terms of use
-are stated.
+No training or evaluation data is shipped here. All three sets are public and
+have to be downloaded from the source, which is also where their licences and
+terms of use are stated.
+
+The one exception is six demonstration radiographs under
+[`serving/samples`](serving/samples/), which the web application offers when
+nobody uploads a file of their own. They are held-out RSNA images, they were
+never trained on, and they are attributed below.
 
 | Set | Used for | Source |
 | --- | --- | --- |
@@ -270,6 +275,32 @@ The Kermany set appears twice on purpose. It was the project's starting point, i
 was abandoned once its file dimensions turned out to give the answer away, and it
 comes back only as a held-out external test set that no training run ever saw.
 Details in [`archiv/kermany`](archiv/kermany/).
+
+### Attribution for the six demonstration images
+
+The images in [`serving/samples`](serving/samples/) come from the RSNA
+Pneumonia Detection Challenge, which annotated radiographs from the NIH Chest
+X-ray collection. Both sources ask to be named, and the RSNA terms of use permit
+redistribution on that condition.
+
+The NIH Clinical Center is the provider of the underlying radiographs. They can
+be downloaded from
+[nihcc.app.box.com/v/ChestXray-NIHCC](https://nihcc.app.box.com/v/ChestXray-NIHCC),
+and the dataset paper is Wang X, Peng Y, Lu L, Lu Z, Bagheri M, Summers RM,
+*ChestX-ray8: Hospital-scale Chest X-ray Database and Benchmarks on
+Weakly-Supervised Classification and Localization of Common Thorax Diseases*,
+IEEE CVPR 2017. The boxes and the three-class labels are RSNA's, from
+[kaggle.com/competitions/rsna-pneumonia-detection-challenge](https://www.kaggle.com/competitions/rsna-pneumonia-detection-challenge),
+described in Shih et al. 2019 as cited above.
+
+How the six were chosen is a separate question from where they come from, and
+the rule was written down before any candidate was looked at: one image per RSNA
+class per projection, each the one sitting closest to the median score of its
+cell, ties broken by identifier, no swaps afterwards. It is in
+[`rsna/befunde/rsna_demobilder.py`](rsna/befunde/rsna_demobilder.py) and
+recorded in `serving/samples/manifest.json`. Picking the best-looking case per
+class would have been selection on the outcome, which is the thing this project
+spent nine phases building guards against.
 
 | | RSNA | |
 | --- | --- | --- |

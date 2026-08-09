@@ -99,6 +99,28 @@ export function ImageSource({ samples, samplesError, selection, onSelect, disabl
         <div className="tabpanel">
           {samplesError && <p className="error-text">Could not load samples: {samplesError}</p>}
           {!samplesError && samples.length === 0 && <p className="muted">No sample images available.</p>}
+          {/* Die Herkunft steht dort, wo die Bilder wirklich zu sehen sind, und
+              nicht nur im README. Beide Quellen wollen genannt werden, und die
+              RSNA-Nutzungsbedingungen erlauben die Weitergabe unter genau
+              dieser Auflage. Volltext in serving/samples/NOTICE.md. */}
+          <p className="muted sample-credit">
+            Six held-out radiographs from the{" "}
+            <a
+              href="https://www.kaggle.com/competitions/rsna-pneumonia-detection-challenge"
+              target="_blank"
+              rel="noreferrer"
+            >
+              RSNA Pneumonia Detection Challenge
+            </a>
+            , which annotated images provided by the{" "}
+            <a href="https://nihcc.app.box.com/v/ChestXray-NIHCC" target="_blank" rel="noreferrer">
+              NIH Clinical Center
+            </a>
+            . No training run ever saw them. They were picked by a rule fixed
+            before the images were looked at: one per class per projection, each
+            the one closest to the median score of its group, so the set is
+            typical rather than flattering.
+          </p>
           <div className="sample-grid">
             {samples.map((s) => {
               const active = selection?.kind === "sample" && selection.sample.id === s.id;
