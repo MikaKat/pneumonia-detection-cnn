@@ -129,9 +129,73 @@ Kish measure. Drawing a PA-positive image 2.42 times does not create 2.42
 patients. What it does create, since the draw passes through
 `build_transforms` again, is 2.42 differently augmented views of it.
 
+--head: der zweite Kopf, Phase 5
+--------------------------------
+Bis hierher beantwortet das Modell eine Frage, ob. Mit `--head` beantwortet es
+zwei, ob und wo. Der Rumpf bleibt derselbe, daneben tritt ein zweiter Ausgang:
+ein Feld von 14 mal 14 Zahlen, trainiert gegen die in dieses Raster
+eingezeichneten annotierten Kaesten. Ausfuehrlich in
+`erklaerungen/14_zweiter_kopf_bau.md`.
+
+Fuenf Entwurfsentscheidungen, jede gemessen oder vorfestgelegt statt gewaehlt:
+
+  1. RASTERWEITE 14 mal 14, entschieden von `rsna_kopfraster.py` auf 4123
+     annotierten Bildern. Die Decke der Punkt-AUC trennt 7 und 14 nicht
+     (0.9928 gegen 0.9989, weniger als die 0.01, die dieses Projekt aufloest);
+     entschieden hat die Decke der IoU, 0.53 gegen 0.74, weil Phase 5b genau
+     diese Zahl als Wettbewerbsmass berichtet. Dass das zweite Tor nachtraeglich
+     dazukam, steht im Kopf von `rsna_kopfraster.py`.
+  2. WO DER KOPF HAENGT: an `layer3`, nicht an `layer4`. Bei 224 Punkten liefert
+     layer3 genau 14 mal 14, der Rumpf bleibt damit voellig unangetastet und der
+     Klassifikationsweg ist Zeile fuer Zeile derselbe wie ohne Kopf. Die
+     Alternative, layer4 mit veraenderter Schrittweite, haette den Rumpf
+     geaendert und damit ZWEI Dinge zugleich, was den gepaarten Vergleich
+     zerstoert. Ein `adaptive_avg_pool2d` auf 14 haelt das Raster fest, auch
+     wenn spaeter mit 512 Punkten gerechnet wird. Genau das ist der Grund,
+     warum Phase 5 vor Phase 8 kommt: das Lineal aendert sich nicht mehr mit
+     dem Gemessenen.
+  3. WEICHE ZIELE. Ziel einer Kachel ist der Anteil ihrer Flaeche, den ein
+     Kasten bedeckt, nicht 0 oder 1. Der Preis des harten Ziels ist gemessen:
+     bei 14 mal 14 erfindet es 14 Prozent Kastenflaeche dazu und verliert 16.
+  4. VERLUSTGEWICHT, gerechnet statt geraten. Auf dem ersten Stapel MIT einem
+     annotierten Bild werden beide Verluste gemessen und lambda so gesetzt,
+     dass sie gleich gross starten. "Gleich gewichtet" ist damit eine Tatsache
+     und keine Behauptung. Wert, Stapelnummer und ein Bereichswaechter stehen
+     im Log und in results_rsna.csv. Der Zusatz "mit einem annotierten Bild"
+     ist der ganze Punkt: bei `exclude` traegt ein Bild ohne Kasten nichts bei,
+     und ein Stapel ohne jeden Kasten ergaebe eine Division durch Null.
+  5. NEGATIVE, `--head-negatives`. Bilder ohne Pneumonie haben keinen Kasten.
+     `exclude` nimmt sie aus dem Kopfverlust, `empty` laesst sie ein leeres Feld
+     lernen. Beide Varianten werden gemessen, das ist selbst ein Befund.
+     ENTSCHIEDEN WIRD AM VORSPRUNG UEBER DEM LAGEPRIORE, nicht am Kopfverlust:
+     ein Kopf, der ueberall Null sagt, hat einen hervorragenden Verlust und ist
+     wertlos. `pos_weight` je Kachel wird zur Variante passend aus dem
+     Fit-Split gerechnet, nicht eingetragen.
+
+DIE KASTENFALLE, der wichtigste Baupunkt
+----------------------------------------
+Sobald die Kaesten ins Training gehen, muss jede geometrische Augmentierung
+AUCH auf die Kaesten wirken. Die Augmentierung dreht bis 7 Grad, verschiebt bis
+3 Prozent und skaliert bis 7 Prozent. Ohne dieselbe Bewegung am Ziel lernt der
+Kopf gegen systematisch verschobene Rechtecke, und die Aufsicht wird zu
+Rauschen. Der Fehler ist unsichtbar: der Verlust faellt, das Skript laeuft
+durch, nur die Karte bleibt diffus.
+
+Deshalb gibt es `TrainTransform`. Sie zieht die Affinparameter EINMAL und wendet
+sie auf Bild und Kastenmaske an. Helligkeit und Kontrast beruehren die Maske
+nicht. `tests/test_rsna_kopf.py` prueft die Schwerpunkte beider nach der
+Transformation gegeneinander.
+
+`TrainTransform` laeuft in BEIDEN Armen, auch ohne Kopf. Das ist Absicht: liefe
+der Arm ohne Kopf noch ueber das alte `build_transforms`, unterschieden sich die
+Arme in der Augmentierungsmechanik UND im Kopf, also in zwei Dingen. Der Preis
+ist, dass Laeufe ab hier nicht mehr bitgleich zu denen vor dem 04.08.2026 sind.
+Das ist verkraftbar, weil der Bezugsarm fuer Phase 5 ohnehin neu gerechnet wird.
+
 CLI:
   python rsna_train.py --fold 0 --epochs 8 --batch 16 --workers 0
   python rsna_train.py --fold 0 --epochs 8 --batch 16 --workers 0 --balance-view
+  python rsna_train.py --fold 0 --balance-view --head --head-negatives exclude
 """
 
 from __future__ import annotations
@@ -146,15 +210,23 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as Fn
 from PIL import Image
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms as T
+from torchvision.transforms import functional as TF
 from torchvision.models import ResNet18_Weights, resnet18
 
 IMNET_MEAN, IMNET_STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
 BOX_SPACE = 1024          # boxes are given in the original DICOM grid
+HEAD_GRID = 14            # measured, not chosen; see rsna_kopfraster.py
+# Plausible range for a MEASURED lambda. Every run so far landed between 0.71
+# and 1.27, so these bounds are three orders of magnitude wide on either side
+# and can only catch a lambda that is wrong, not one that is unexpected. A
+# value entered by hand through --head-lambda is not checked against them.
+LAMBDA_MIN, LAMBDA_MAX = 1e-3, 1e3
 
 
 # --------------------------------------------------------------------------
@@ -162,10 +234,20 @@ BOX_SPACE = 1024          # boxes are given in the original DICOM grid
 # --------------------------------------------------------------------------
 
 class RsnaDataset(Dataset):
-    """IDs instead of paths. The loader builds the path. See rsna_splits.py."""
+    """IDs instead of paths. The loader builds the path. See rsna_splits.py.
 
-    def __init__(self, root: Path, ids: list[str], labels: dict[str, int], tf):
+    With `boxes` given the item grows from (image, label) to
+    (image, label, field, used). `field` is the localisation target on the head
+    grid, `used` says whether this image counts towards the localisation loss.
+    Without `boxes` the return value is exactly what it always was, so the
+    single-headed arm is not touched by the extension.
+    """
+
+    def __init__(self, root: Path, ids: list[str], labels: dict[str, int], tf,
+                 boxes: dict | None = None, grid: int = HEAD_GRID,
+                 negatives: str = "exclude", size: int = 224):
         self.root, self.ids, self.labels, self.tf = root, ids, labels, tf
+        self.boxes, self.grid, self.negatives, self.size = boxes, grid, negatives, size
 
     def __len__(self) -> int:
         return len(self.ids)
@@ -173,7 +255,52 @@ class RsnaDataset(Dataset):
     def __getitem__(self, i):
         pid = self.ids[i]
         img = Image.open(self.root / f"{pid}.png").convert("L")
-        return self.tf(img), float(self.labels[pid])
+        if self.boxes is None:
+            return self.tf(img), float(self.labels[pid])
+
+        b = self.boxes.get(pid)
+        # The mask is drawn at the SAME edge length the image is resized to,
+        # because the affine translation is measured in pixels of that grid. A
+        # mask drawn at 224 and an image at 512 would move by different amounts
+        # and the boxes would drift, which is the box trap in its quietest form.
+        mask = box_mask_pil(b, self.size)
+        x, m = self.tf(img, mask)
+        field = tile_coverage(m, self.grid)
+        # An image without a box carries an empty field either way; `used`
+        # decides whether that empty field is a statement ("nothing here") or
+        # simply no data. That is the whole `--head-negatives` question.
+        used = 1.0 if b else (1.0 if self.negatives == "empty" else 0.0)
+        return x, float(self.labels[pid]), field, used
+
+
+def box_mask_pil(boxes, size: int, box_space: int = BOX_SPACE) -> Image.Image:
+    """Bounding boxes as a black and white PIL image of edge length `size`.
+
+    PIL and not a tensor, so the mask can go through exactly the same
+    `TF.affine` call as the image. Same truncation as `cam_vs_boxes` and as
+    `rsna_lokalisation.box_mask`, deliberately, so target and measurement see
+    the same rectangle down to the pixel.
+    """
+    a = np.zeros((size, size), np.uint8)
+    if boxes:
+        s = size / box_space
+        for bx, by, bw, bh in boxes:
+            y0, y1 = max(int(by * s), 0), int((by + bh) * s)
+            x0, x1 = max(int(bx * s), 0), int((bx + bw) * s)
+            a[y0:y1, x0:x1] = 255
+    return Image.fromarray(a, mode="L")
+
+
+def tile_coverage(mask: Image.Image, grid: int) -> torch.Tensor:
+    """The share of each tile covered by a box. The soft target, 1 x grid x grid.
+
+    `adaptive_avg_pool2d` and not a reshape: at 224 pixels and 14 tiles the two
+    are identical (16 by 16 blocks), at 512 pixels the edge length is not
+    divisible and a reshape would raise. Pooling keeps the same code path for
+    every image size, which is the point of a head grid that does not move.
+    """
+    a = torch.from_numpy(np.asarray(mask, dtype=np.float32) / 255.0)[None, None]
+    return Fn.adaptive_avg_pool2d(a, grid)[0]
 
 
 class MaskCorners:
@@ -204,6 +331,11 @@ class MaskCorners:
 def build_transforms(size: int, train: bool):
     # NO horizontal flipping: it creates situs inversus, mirrors the cardiac
     # silhouette and contradicts the side marker printed in the image.
+    #
+    # Training now goes through TrainTransform instead, see below. This
+    # function stays because the evaluation path (train=False) is used
+    # unchanged in four places and because `perturbed_transform` builds on the
+    # same base list.
     base = [T.Grayscale(num_output_channels=3), T.ToTensor(),
             T.Normalize(IMNET_MEAN, IMNET_STD)]
     if not train:
@@ -213,6 +345,153 @@ def build_transforms(size: int, train: bool):
         T.RandomAffine(degrees=7, translate=(0.03, 0.03), scale=(0.93, 1.07)),
         T.ColorJitter(brightness=0.15, contrast=0.15),
     ] + base)
+
+
+class TrainTransform:
+    """The training augmentation, applied to image AND box mask at once.
+
+    THE BOX TRAP. `T.RandomAffine` draws its parameters inside its own
+    `__call__`. Calling it twice, once for the image and once for the mask,
+    draws TWICE and moves the two by different amounts. The box would then sit
+    somewhere the opacity is not, the head would be supervised against noise,
+    and nothing in the output would say so: the loss falls, the script
+    finishes, only the map stays diffuse. It is the most common reason a
+    hand-built localisation head "just does not learn".
+
+    The fix is to draw ONCE with `RandomAffine.get_params` and apply the same
+    parameters to both. Geometry is shared, photometry is not: brightness and
+    contrast do not move a rectangle, so the jitter only touches the image.
+
+    Nearest neighbour for the mask keeps it binary. The image keeps the nearest
+    neighbour interpolation it always had, so the pixels of the single-headed
+    arm are produced the same way as before.
+
+    The order of the random draws is IDENTICAL whether or not a mask is passed:
+    `get_params` first, `ColorJitter` second, and the mask branch draws
+    nothing. That is what allows the arm with the head and the arm without to
+    be compared as a paired experiment rather than as two different recipes.
+
+    STRENGTH IS AN ARGUMENT, and the defaults are the values every run up to
+    phase 5 used. `TrainTransform(size)` therefore draws exactly what it drew
+    before, down to the bit: `get_params` sees the same three arguments and the
+    generator is not touched by the signature. Phase 6 raises translate and
+    widens scale through `--aug-translate` and `--aug-scale`, so the two arms
+    differ in those numbers and in nothing else.
+
+    Rotation stays at 7 degrees and is an argument only for completeness. More
+    is unphysiological on a chest film, and mirroring stays forbidden anywhere
+    in this file: it produces situs inversus and contradicts the side marker
+    printed into the image.
+
+    THE PHOTOMETRIC STRENGTH IS AN ARGUMENT TOO, added 09.08.2026 for phase 9.
+    Until then `brightness` and `contrast` sat hard wired at 0.15 inside this
+    constructor while the geometric strengths were already arguments, which is
+    the exact shape of `--balance-strength`: a number that a caller believes it
+    controls and does not. The defaults are 0.15, so every run up to phase 8
+    means the same thing it meant before.
+
+    What the knob can reach was measured BEFORE the phase, not diagnosed after
+    it: `rsna/befunde/rsna_photometrie_reichweite.py`. At 0.15 the jitter
+    removes 4 percent of the global brightness cue and 22 percent of the global
+    contrast cue, so the value every run so far used is, for this purpose,
+    close to no jitter at all.
+    """
+
+    def __init__(self, size: int, translate: float = 0.03,
+                 scale: tuple[float, float] = (0.93, 1.07),
+                 degrees: float = 7.0, brightness: float = 0.15,
+                 contrast: float = 0.15):
+        self.size = size
+        self.degrees = [-float(degrees), float(degrees)]
+        self.translate = (float(translate), float(translate))
+        self.scale = (float(scale[0]), float(scale[1]))
+        self.brightness = float(brightness)
+        self.contrast = float(contrast)
+        self.jitter = T.ColorJitter(brightness=self.brightness,
+                                    contrast=self.contrast)
+        self.finish = T.Compose([T.Grayscale(num_output_channels=3),
+                                 T.ToTensor(), T.Normalize(IMNET_MEAN, IMNET_STD)])
+
+    def __call__(self, img: Image.Image, mask: Image.Image | None = None):
+        img = TF.resize(img, [self.size, self.size])
+        p = T.RandomAffine.get_params(self.degrees, self.translate, self.scale,
+                                      None, [self.size, self.size])
+        img = TF.affine(img, *p, interpolation=T.InterpolationMode.NEAREST, fill=0)
+        x = self.finish(self.jitter(img))
+        if mask is None:
+            return x
+        mask = TF.affine(mask, *p, interpolation=T.InterpolationMode.NEAREST, fill=0)
+        return x, mask
+
+
+# The probe image for the measurement below. 62 x 62 = 3844 = 31 * 124, so the
+# 31 grey values 49 to 79 each appear 124 times and the mean is EXACTLY 64.0.
+# That matters: `ImageEnhance.Contrast` blends towards the mean ROUNDED to an
+# integer, and a mean of 63.5 would put a factor dependent wobble into the very
+# statistic being read off. No value can clip either: at the largest factor
+# this file allows, 79 * 2 = 158 and 64 + 2 * 15 = 94, both below 255.
+_PROBE_LO, _PROBE_HI, _PROBE_N = 49, 79, 124
+_PROBE_MEAN = 64.0
+_PROBE_SD = float(np.std(np.repeat(np.arange(_PROBE_LO, _PROBE_HI + 1),
+                                   _PROBE_N)))
+
+
+def gemessene_jitter_staerke(tf: "TrainTransform", ziehungen: int = 512,
+                             seed: int = 20260809) -> tuple[float, float]:
+    """Die photometrische Staerke, GEMESSEN am Objekt, das der Loader benutzt.
+
+    Dasselbe Muster wie `input_px` in Phase 8 und `head_lambda_measured` in
+    Phase 5, und aus demselben Anlass: `--balance-strength` wurde einmal
+    korrekt gerechnet und dann als Vorgabe weitergereicht, und nichts in der
+    Ausgabe widersprach. `args.aug_brightness` ist eine Selbstauskunft. Was
+    hier herauskommt, ist es nicht: es ist die Streuung der Faktoren, die
+    `tf.jitter` wirklich zieht.
+
+    Gelesen wird an einem Testbild mit bekanntem Mittelwert und bekannter
+    Streuung. ColorJitter multipliziert den Mittelwert mit dem
+    Helligkeitsfaktor, und die Streuung mit dem Produkt aus Helligkeits- und
+    Kontrastfaktor; beide Faktoren lassen sich damit je Ziehung zurueckrechnen.
+    Gleichverteilt auf [1-b, 1+b] hat eine Standardabweichung von b/sqrt(3),
+    also ist b das sqrt(3)-fache der gemessenen Streuung.
+
+    Das Abschneiden bei PIL verschiebt den Mittelwert um eine feste halbe
+    Stufe. Fest heisst: es faellt aus einer Standardabweichung heraus und muss
+    nicht korrigiert werden.
+
+    GENAUIGKEIT, gemessen und nicht behauptet: die Helligkeit kommt auf 0,4
+    Prozent genau heraus, der Kontrast liegt systematisch 6 bis 9 Prozent zu
+    hoch, weil die Streuung eines auf ganze Grauwerte gerundeten Testbildes
+    nach oben verzerrt ist. Das ist der Grund fuer die weite Schranke unten.
+    Diese Zahl ist eine VERKABELUNGSPRUEFUNG und keine Kalibrierung: sie soll
+    0,15 von 0,60 unterscheiden, und das ist ein Faktor vier.
+
+    DER ZUFALLSSTROM WIRD UNVERAENDERT ZURUECKGEGEBEN. Sonst zoege dieses
+    Messen dem Training Zufallszahlen weg, und ein Lauf waere nicht mehr
+    derselbe wie ohne die Messung. Geprueft in tests/test_rsna_phase9.py.
+    """
+    if max(tf.brightness, tf.contrast) > 0.9:
+        raise SystemExit(
+            "ABORT: --aug-brightness/--aug-contrast above 0.9. torchvision "
+            "clamps the lower end of the factor range at 0, so the draw would "
+            "no longer be uniform on [1-b, 1+b] and this measurement would "
+            "read a strength that is not the one in effect. At exactly 1.0 a "
+            "drawn factor of 0 also makes the contrast unrecoverable, since "
+            "an all black image has no spread left to read.")
+    a = np.repeat(np.arange(_PROBE_LO, _PROBE_HI + 1, dtype=np.uint8), _PROBE_N)
+    probe = Image.fromarray(a.reshape(62, 62), mode="L")
+    zustand = torch.get_rng_state()
+    try:
+        fb = np.empty(ziehungen)
+        fc = np.empty(ziehungen)
+        torch.manual_seed(seed)
+        for i in range(ziehungen):
+            v = np.asarray(tf.jitter(probe), dtype=np.float64)
+            fb[i] = v.mean() / _PROBE_MEAN
+            fc[i] = v.std() / (fb[i] * _PROBE_SD)
+    finally:
+        torch.set_rng_state(zustand)
+    w = float(np.sqrt(3.0))
+    return float(fb.std(ddof=1) * w), float(fc.std(ddof=1) * w)
 
 
 def view_balance_weights(y: np.ndarray, vp: np.ndarray,
@@ -401,38 +680,257 @@ def perturbed_transform(size: int, name: str):
 # Training
 # --------------------------------------------------------------------------
 
-def pick_device(name: str):
-    """DirectML is the only GPU path on this hardware (RX 5500 XT, RDNA1)."""
+def dml_adapters() -> list[str]:
+    """Names of every DirectML adapter, empty list if torch-directml is absent.
+
+    Deliberately separate from pick_device: listing the hardware must be
+    possible without also selecting it. rsna_hardware.py prints this, the test
+    reads it.
+    """
+    try:
+        import torch_directml
+    except ImportError:
+        return []
+    if not torch_directml.is_available():
+        return []
+    # .strip(): the driver hands the names back padded with a trailing blank,
+    # which then ends up in every CSV cell and turns an equality test on the
+    # chip name into a silent mismatch.
+    return [str(torch_directml.device_name(i)).strip()
+            for i in range(torch_directml.device_count())]
+
+
+def pick_device(name: str, dml_index: int = 0):
+    """Returns (device, pin_memory, label). DirectML is the GPU path here.
+
+    `torch_directml.device()` WITHOUT an index returns adapter 0, and adapter 0
+    on this machine is the integrated graphics of the CPU, not the RX 5500 XT
+    in the slot. Every run of this project up to 02.08.2026 therefore went to
+    the integrated chip, and no log ever said so, because `privateuseone:0`
+    names the interface and not the chip. Two changes follow:
+
+      * the index becomes an argument (`--dml-index`), default 0, so that an
+        older command line still means exactly what it meant before, and
+      * the third return value is a readable label which the caller writes
+        into the log AND into results_rsna.csv. Provenance belongs in the
+        data, not in a file name; see the checkpoint mix-up of 26.07.
+
+    An index outside the range is a hard stop, not a silent fall back to
+    adapter 0. A typo that quietly trains four hours on the wrong chip is
+    exactly the failure this function was rewritten to prevent.
+    """
     if name in ("auto", "cuda") and torch.cuda.is_available():
-        return torch.device("cuda"), True
+        return torch.device("cuda"), True, f"cuda:0 {torch.cuda.get_device_name(0)}"
     if name in ("auto", "directml"):
         try:
             import torch_directml
             if torch_directml.is_available():
-                return torch_directml.device(), False
+                names = dml_adapters()
+                if not 0 <= dml_index < len(names):
+                    listing = "\n".join(f"    {i}  {n}"
+                                        for i, n in enumerate(names)) or "    (keiner)"
+                    raise SystemExit(
+                        f"--dml-index {dml_index} does not exist. "
+                        f"Adapters found:\n{listing}")
+                return (torch_directml.device(dml_index), False,
+                        f"directml:{dml_index} {names[dml_index]}")
         except ImportError:
             if name == "directml":
                 raise SystemExit("torch-directml is missing:  pip install torch-directml")
     if name == "directml":
         raise SystemExit("torch-directml finds no device.")
-    return torch.device("cpu"), False
+    return torch.device("cpu"), False, "cpu"
 
 
-def make_model(device):
+class TwoHeadNet(nn.Module):
+    """ResNet18 with a second output: a grid x grid field saying WHERE.
+
+    The classification path is the stock `resnet18.forward`, written out step by
+    step rather than reimplemented, so it computes exactly what the single
+    headed model computes. That is not tidiness, it is the condition for the
+    comparison: the two arms have to differ in the head and in nothing else.
+
+    The head taps `layer3`. Two reasons, and the second is the one that
+    matters:
+
+      * At 224 pixels layer3 is already 14 by 14, the chosen grid. Nothing in
+        the trunk has to be changed to get it. Reaching 14 from layer4 would
+        mean changing its stride, and that changes the classification path too,
+        which is a second difference between the arms.
+      * `adaptive_avg_pool2d` to a FIXED grid means the head keeps its 14 by 14
+        whatever the input size. At 512 pixels layer3 delivers 32 by 32 and is
+        pooled down. The measuring stick therefore stops moving with the thing
+        it measures, which is the whole reason phase 5 comes before phase 8.
+
+    The head is one 1x1 convolution, i.e. a logistic regression per tile on the
+    256 layer3 channels. Deliberately the smallest thing that can do the job:
+    anything deeper would make "does supervision help" and "does more capacity
+    help" the same experiment.
+    """
+
+    def __init__(self, grid: int = HEAD_GRID, pretrained: bool = True):
+        super().__init__()
+        # `pretrained=False` exists for the tests only. They check the wiring,
+        # the grid and the identity of the classification path, and none of
+        # that needs ImageNet weights. Downloading 45 MB to assert a tensor
+        # shape would make the test suite depend on the network.
+        m = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
+        m.fc = nn.Linear(m.fc.in_features, 1)
+        self.trunk = m
+        self.grid = grid
+        self.loc = nn.Conv2d(256, 1, kernel_size=1)
+        # Zero bias, small weights: the field starts at logit 0, i.e. at
+        # probability 0.5 everywhere. With `pos_weight` correcting the tile
+        # imbalance that is the neutral start, and lambda is measured from it.
+        nn.init.normal_(self.loc.weight, std=0.01)
+        nn.init.zeros_(self.loc.bias)
+
+    def features3(self, x):
+        m = self.trunk
+        x = m.maxpool(m.relu(m.bn1(m.conv1(x))))
+        return m.layer3(m.layer2(m.layer1(x)))
+
+    def forward(self, x):
+        f3 = self.features3(x)
+        f4 = self.trunk.layer4(f3)
+        logit = self.trunk.fc(torch.flatten(self.trunk.avgpool(f4), 1))
+        field = self.loc(Fn.adaptive_avg_pool2d(f3, self.grid))
+        return logit, field
+
+
+class ClassifierView(nn.Module):
+    """The classification branch alone, so Grad-CAM sees a plain classifier.
+
+    `pytorch_grad_cam` expects a module that returns one tensor and it hooks a
+    layer by object identity. A two-headed model returns a tuple and breaks it.
+    This wrapper hands out the logit and forwards `layer4`, so the SAME
+    Grad-CAM code measures both arms. That matters more than it looks: the
+    roadmap asks for three numbers, and the informative one is Grad-CAM against
+    Grad-CAM, same instrument on both models. Comparing the single-headed
+    Grad-CAM with the two-headed head output would compare two instruments and
+    call it two models.
+    """
+
+    def __init__(self, net: TwoHeadNet):
+        super().__init__()
+        self.net = net
+        self.layer4 = net.trunk.layer4
+
+    def forward(self, x):
+        return self.net(x)[0]
+
+
+def make_model(device, head: bool = False, grid: int = HEAD_GRID):
+    if head:
+        return TwoHeadNet(grid).to(device)
     m = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
     m.fc = nn.Linear(m.fc.in_features, 1)
     return m.to(device)
 
 
+def head_logit(model, x):
+    """The classification logit, whichever model this is."""
+    out = model(x)
+    return (out[0] if isinstance(out, tuple) else out).squeeze(1)
+
+
 @torch.no_grad()
-def predict(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
+def predict(model, loader, device, fields: bool = False):
+    """Probabilities and labels; with `fields=True` also the head output.
+
+    The field comes back on the CPU as float32, one grid x grid map per image.
+    For 3812 validation images at 14 by 14 that is about 3 MB, which is why it
+    is simply kept rather than sampled: every later question about the head
+    (phase 5b, thresholds, IoU, mAP) can then be answered without retraining,
+    the same reason every prediction has gone to disk since phase 3.
+    """
     model.eval()
-    p, y = [], []
-    for x, t in loader:
-        logit = model(x.to(device, non_blocking=True)).squeeze(1)
+    p, y, f = [], [], []
+    for batch in loader:
+        x, t = batch[0], batch[1]
+        out = model(x.to(device, non_blocking=True))
+        logit = (out[0] if isinstance(out, tuple) else out).squeeze(1)
         p.append(torch.sigmoid(logit).float().cpu().numpy())
         y.append(t.numpy())
+        if fields:
+            if not isinstance(out, tuple):
+                raise ValueError("fields=True on a model without a head")
+            f.append(torch.sigmoid(out[1][:, 0]).float().cpu().numpy())
+    if fields:
+        return np.concatenate(p), np.concatenate(y), np.concatenate(f)
     return np.concatenate(p), np.concatenate(y)
+
+
+def tile_pos_weight(boxes: dict, ids: list[str], grid: int, negatives: str,
+                    size: int = 224) -> tuple[float, float]:
+    """(pos_weight per tile, mean tile coverage) for the localisation loss.
+
+    Measured on the fitting split of this fold, exactly like the classification
+    `pos_weight` two functions down, and for the same reason: an entered number
+    is a number nobody checks. It is also NOT the same value for the two
+    `--head-negatives` variants, which is easy to miss. With `exclude` only
+    annotated images enter and the mean coverage is about 0.118. With `empty`
+    all images enter, roughly a fifth of them carry a box, and the mean
+    coverage drops by that factor. Using the `exclude` value in the `empty` arm
+    would under-correct the imbalance by a factor of four and the head would
+    learn to say nothing, which is the exact failure this weight exists to
+    prevent.
+
+    Computed from the raw counts even when `--balance-view` is on. That is
+    correct rather than sloppy: the reweighting preserves both marginals
+    exactly (see `view_balance_weights`), so the prevalence in the stream is
+    the prevalence in the split.
+
+    Returns (weight, coverage). A coverage of 0 would be a division by zero and
+    means no image in this split has a box, which is a broken split, not a
+    weight of infinity.
+    """
+    use = [i for i in ids if (i in boxes or negatives == "empty")]
+    if not use:
+        raise ValueError("no image feeds the localisation loss")
+    cov = float(np.mean([
+        np.asarray(box_mask_pil(boxes.get(i), size), np.float32).mean() / 255.0
+        for i in use]))
+    if cov <= 0:
+        raise ValueError("mean tile coverage is 0, the split carries no boxes")
+    return (1.0 - cov) / cov, cov
+
+
+def loc_loss(field: torch.Tensor, target: torch.Tensor, used: torch.Tensor,
+             crit) -> torch.Tensor:
+    """Localisation loss, averaged over the images that count.
+
+    `crit` has `reduction="none"`, so the per-tile losses arrive intact and the
+    mean is taken here in two steps: over tiles first, then over the images
+    with `used == 1`. Letting `BCEWithLogitsLoss` average everything at once
+    would silently weight an image by its tile count, which is constant here,
+    but it would also average the excluded images in as zeros and quietly scale
+    the loss down by whatever share of the batch they are. The scale is not
+    cosmetic, lambda is measured from it.
+
+    A batch without a single usable image returns 0 and contributes no
+    gradient. With `--head-negatives exclude`, 22.5 percent annotated images
+    and batch size 16 that is 0.775^16, about one batch in 59. Over five folds
+    the chance that at least one FIRST batch is empty is 8 percent, and the
+    first batch is the one lambda is measured from. That is why the measurement
+    waits for a batch with a usable image instead of taking batch one.
+    """
+    per_tile = crit(field[:, 0], target[:, 0])
+    per_image = per_tile.flatten(1).mean(1)
+    n = used.sum()
+    if float(n) == 0:
+        return field.sum() * 0.0
+    return (per_image * used).sum() / n
+
+
+def batch_can_set_lambda(used: torch.Tensor) -> bool:
+    """May lambda be measured from this batch?
+
+    Only from a batch that has at least one image in the localisation loss.
+    Everything else about the measurement stays in the training loop; this is
+    the condition alone, split out so it can be tested without a training run.
+    """
+    return float(used.sum()) > 0
 
 
 def bce_from_probs(y: np.ndarray, p: np.ndarray, pos_weight: float = 1.0) -> float:
@@ -675,6 +1173,59 @@ def main() -> None:
                         "off against the Grad-CAM loss in AP")
     p.add_argument("--device", default="auto",
                    choices=["auto", "cuda", "directml", "cpu"])
+    p.add_argument("--dml-index", type=int, default=0,
+                   help="which DirectML adapter. 0 is the integrated graphics "
+                        "and was the silent default of every run before "
+                        "02.08.2026, 1 is the RX 5500 XT. The default stays 0 "
+                        "so that an old command line keeps its old meaning; "
+                        "list the adapters with rsna_hardware.py liste")
+    p.add_argument("--head", action="store_true",
+                   help="second output: a grid x grid field trained against "
+                        "the annotated boxes. Phase 5; see the module header")
+    p.add_argument("--head-grid", type=int, default=HEAD_GRID,
+                   help="tiles per side. 14 was measured by rsna_kopfraster.py "
+                        "and is fixed; the switch exists so the measurement "
+                        "can be repeated, not so the value can be shopped for")
+    p.add_argument("--head-negatives", default="exclude",
+                   choices=["exclude", "empty"],
+                   help="images without a box: keep them out of the "
+                        "localisation loss, or let them learn an empty field. "
+                        "Both are measured, the difference is itself a finding")
+    p.add_argument("--head-lambda", type=float, default=0.0,
+                   help="weight of the localisation loss. 0 means MEASURE it "
+                        "on the first batch that carries an annotated image, "
+                        "so both losses start equal, which is the "
+                        "pre-registered recipe. A value entered here overrides "
+                        "that, skips the range check, and is written into "
+                        "results_rsna.csv")
+    # Phase 6 turns these two up and nothing else. Defaults are the values of
+    # every run up to phase 5, so an unchanged command line means an unchanged
+    # experiment.
+    p.add_argument("--aug-translate", type=float, default=0.03,
+                   help="random shift as a fraction of the edge. Phase 6 uses "
+                        "0.08 to make the framing an unreliable cue")
+    p.add_argument("--aug-scale", type=float, nargs=2, default=[0.93, 1.07],
+                   metavar=("LO", "HI"),
+                   help="random rescaling range. Phase 6 uses 0.75 1.0, which "
+                        "attacks the same confounder the crop of phase 7 "
+                        "attacks, but at the root and without a mask")
+    p.add_argument("--aug-degrees", type=float, default=7.0,
+                   help="rotation. More is unphysiological on a chest film; "
+                        "the switch exists so the value can be seen, not so it "
+                        "can be shopped for")
+    # Phase 9 turns these two up and nothing else. Until 09.08.2026 they sat
+    # hard wired at 0.15 inside TrainTransform while the three above were
+    # already arguments.
+    p.add_argument("--aug-brightness", type=float, default=0.15,
+                   help="photometric jitter, brightness factor drawn per image "
+                        "from [1-b, 1+b]. Phase 9 uses 0.60; at the default "
+                        "0.15 the jitter removes 4 percent of the global "
+                        "brightness cue, see rsna_photometrie_reichweite.py")
+    p.add_argument("--aug-contrast", type=float, default=0.15,
+                   help="photometric jitter, contrast factor drawn per image "
+                        "from [1-c, 1+c]. Phase 9 uses 0.60. This is the knob "
+                        "that matters: the global contrast separates AP from "
+                        "PA at AUC 0.758, the global brightness at 0.540")
     p.add_argument("--cam-n", type=int, default=300, help="0 = skip Grad-CAM")
     p.add_argument("--out", type=Path, default=Path("results_rsna.csv"))
     p.add_argument("--pred-dir", type=Path, default=Path("predictions_rsna"))
@@ -689,13 +1240,41 @@ def main() -> None:
                         "<pred-dir>/history_f{fold}_s{seed}.csv)")
     args = p.parse_args()
 
+    # ---- images and boxes have to describe the SAME picture --------------
+    # A crop folder written by `rsna_make_crops.py` carries its own
+    # `stage_2_train_labels.csv`, with the boxes converted into the grid OF THE
+    # CROP. If the images come from such a folder while `--csv` points
+    # somewhere else, the model trains on cropped pictures against boxes in the
+    # coordinates of the uncropped ones. The head then learns to point at the
+    # wrong place, Grad-CAM is scored against rectangles that do not belong to
+    # the image, and none of that shows up in the stratified AUC. It would look
+    # like a null result.
+    #
+    # The check is deliberately narrow, so the old path is untouched: with
+    # `--images data/rsna/png512 --csv data/rsna` there is no label file inside
+    # the image folder and nothing happens.
+    eigene_kaesten = args.images / "stage_2_train_labels.csv"
+    if eigene_kaesten.exists():
+        try:
+            gleich = args.csv.resolve() == args.images.resolve()
+        except OSError:                       # a path that cannot be resolved
+            gleich = str(args.csv) == str(args.images)
+        if not gleich:
+            print(f"\nABORT: {args.images} carries its own "
+                  f"stage_2_train_labels.csv,")
+            print(f"       but --csv points at {args.csv}.")
+            print("       The boxes would then live in the coordinate frame of")
+            print("       a different picture than the pixels. Pass")
+            print(f"       --csv {args.images}")
+            raise SystemExit(2)
+
     torch.manual_seed(args.seed); np.random.seed(args.seed); random.seed(args.seed)
 
     sp = json.loads(args.splits.read_text())
     labels = {k: int(v) for k, v in sp["labels"].items()}
     vpmap = sp["viewpos"]
     fold = sp["folds"][args.fold]
-    device, pin = pick_device(args.device)
+    device, pin, dev_label = pick_device(args.device, args.dml_index)
 
     fit_ids, sel_ids = inner_split(fold["train"], labels, vpmap,
                                    args.seed, args.inner_splits)
@@ -703,6 +1282,15 @@ def main() -> None:
     y_fit = np.array([labels[i] for i in fit_ids])
 
     print(f"\nFold {args.fold}, Seed {args.seed}, Device {device}")
+    # `device` alone prints privateuseone:0 whatever the chip. The label is the
+    # only place the chip is named, so it goes into the log AND into the result
+    # row further down.
+    print(f"  Hardware: {dev_label}")
+    # WHICH PIXELS and WHICH BOXES, in the log and not only in the command
+    # line. The phase 7 runner greps these two lines: they are the entire lever
+    # of that phase, and up to 07.08.2026 they appeared nowhere in the output.
+    print(f"  images: {args.images}")
+    print(f"  boxes:  {args.csv}")
     print(f"  fit {len(fit_ids)} (pos {y_fit.mean():.3f}) | sel {len(sel_ids)} "
           f"| val {len(val_ids)}")
     print(f"  Targets: overall AUC > 0.729 (header baseline), "
@@ -741,11 +1329,74 @@ def main() -> None:
               "0.0233 +- 0.0021 at strength 1.0.")
         print("    See the module header.")
 
-    tr = DataLoader(RsnaDataset(args.images, fit_ids, labels,
-                               build_transforms(args.size, True)),
+    # Boxes are loaded BEFORE training now, not after it. Up to phase 4 they
+    # were read once the model was finished, purely to score Grad-CAM; from
+    # phase 5 they are training data. That single line is the whole change of
+    # target, and it is also the moment the hit rate stops being an
+    # independent control. See the module header of `zielgroesse_lokalisation`.
+    boxes = load_boxes(args.csv) if args.head else None
+    tile_w, tile_cov = ((None, None) if not args.head else
+                        tile_pos_weight(boxes, fit_ids, args.head_grid,
+                                        args.head_negatives, args.size))
+    if args.head:
+        n_boxed = sum(1 for i in fit_ids if i in boxes)
+        print(f"\n  --head: {args.head_grid} x {args.head_grid} field, "
+              f"negatives '{args.head_negatives}'")
+        print(f"    {n_boxed} of {len(fit_ids)} fitting images carry a box")
+        print(f"    mean tile coverage {tile_cov:.4f} -> pos_weight per tile "
+              f"{tile_w:.2f}")
+        print("    PRE-REGISTERED: the primary endpoint of phase 5 is A, the "
+              "stratified AUC.")
+        print("    B is not an endpoint here. A model trained to point will "
+              "point better;")
+        print("    that is a definition, not a finding. The question is what "
+              "it COSTS.")
+        print("    Smoke test before any comparison: the head has to beat the "
+              "LOCATION PRIOR,")
+        print("    not chance. rsna_kopf_auswertung.py checks that.")
+
+    # TrainTransform, not build_transforms(size, True): the augmentation has to
+    # move image and box mask together. It runs in BOTH arms so the two differ
+    # in the head alone; see the box trap in the module header.
+    train_tf = TrainTransform(args.size, args.aug_translate,
+                              tuple(args.aug_scale), args.aug_degrees,
+                              args.aug_brightness, args.aug_contrast)
+    # Into the log, because a strength that lives only in a command line is a
+    # strength that gets lost. The phase 6 runner greps this line.
+    print(f"\n  --aug: rotation {args.aug_degrees:g} deg, translate "
+          f"{args.aug_translate:.3f}, scale {args.aug_scale[0]:.2f} to "
+          f"{args.aug_scale[1]:.2f}")
+    print(f"  --aug photometrisch: brightness {args.aug_brightness:.2f}, "
+          f"contrast {args.aug_contrast:.2f}")
+    if (args.aug_translate, tuple(args.aug_scale)) != (0.03, (0.93, 1.07)):
+        print("    STRONGER THAN THE DEFAULT. The box mask moves with the "
+              "image, and")
+        print("    a mistake there now weighs more. tests/test_rsna_kopf.py "
+              "checks it")
+        print("    at exactly these numbers.")
+    tr = DataLoader(RsnaDataset(args.images, fit_ids, labels, train_tf,
+                                boxes=boxes, grid=args.head_grid,
+                                negatives=args.head_negatives, size=args.size),
                     batch_size=args.batch, num_workers=args.workers,
                     pin_memory=pin, drop_last=True,
                     **train_loader_kwargs(w_fit, args.seed))
+    # Not the switch, the draw. Measured on the transform object the loader
+    # above actually holds, so it also catches the case where the switch is
+    # read and then not wired through; see the docstring and phase 8's
+    # `input_px`. The abort is hard for the same reason it is hard there: a
+    # mismatch means the row this run writes would claim a strength the run did
+    # not use, and every paired comparison built on it would be wrong in a way
+    # nobody could find afterwards.
+    b_gemessen, c_gemessen = gemessene_jitter_staerke(tr.dataset.tf)
+    print(f"    gemessen am Ziehen: brightness {b_gemessen:.3f}, contrast "
+          f"{c_gemessen:.3f}  (512 Ziehungen, erwartet je der Schalterwert)")
+    for name, soll, ist in (("brightness", args.aug_brightness, b_gemessen),
+                            ("contrast", args.aug_contrast, c_gemessen)):
+        if abs(ist - soll) > max(0.25 * soll, 0.03):
+            raise SystemExit(
+                f"ABORT: --aug-{name} says {soll:.3f}, the transform the "
+                f"loader holds draws {ist:.3f}. The switch is not reaching "
+                f"the jitter.")
     sel = DataLoader(RsnaDataset(args.images, sel_ids, labels,
                                 build_transforms(args.size, False)),
                      batch_size=args.batch * 2, num_workers=args.workers)
@@ -753,13 +1404,36 @@ def main() -> None:
                                build_transforms(args.size, False)),
                     batch_size=args.batch * 2, num_workers=args.workers)
 
-    model = make_model(device)
+    model = make_model(device, head=args.head, grid=args.head_grid)
     # Positive rate 0.225. The imbalance tips the other way than on Kermany
     # (0.74), so pos_weight is > 1 instead of < 1.
     pos_weight = torch.tensor([(y_fit == 0).sum() / max((y_fit == 1).sum(), 1)],
                               dtype=torch.float32, device=device)
     print(f"  pos_weight {pos_weight.item():.2f}")
     crit = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    crit_loc = (nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor([tile_w], dtype=torch.float32, device=device),
+        reduction="none") if args.head else None)
+    # 0 means "measure it". It is filled in below, printed, and written to
+    # results_rsna.csv together with the batch it came from, so both can be
+    # read off a finished run instead of being reconstructed from the command
+    # line. 0 in `lam_batch` means it was not measured but entered by hand.
+    lam = float(args.head_lambda)
+    lam_batch = 0
+    # 0 means "not measured yet". Filled from the first training batch below.
+    # WHY A MEASURED EDGE LENGTH AND NOT JUST args.size, added 08.08.2026 for
+    # phase 8: `--size` is the ONE lever of that phase, and up to this line it
+    # appeared nowhere in the output. An arm that had silently trained at 224
+    # would produce a clean looking null result, exactly the phase 7 problem
+    # with `--images` one level further in.
+    #
+    # `args.size` is a self report: it says what the run believed it was doing.
+    # This one is not: it is the edge length of the tensor the model actually
+    # receives, so it also catches the case where the switch is read and then
+    # not wired through. That has happened in this project before, see
+    # `--balance-strength`, which was computed correctly and then passed on as
+    # the default.
+    input_px = 0
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=args.lr, total_steps=args.epochs * max(len(tr), 1))
@@ -809,15 +1483,90 @@ def main() -> None:
         # curve. `drop_last=True` makes all batches the same size, so the mean
         # of the means is the right one.
         loss_sum = torch.zeros((), device=device)
+        loc_sum = torch.zeros((), device=device)
         n_batch = 0
-        for x, t in tr:
-            x, t = x.to(device, non_blocking=True), t.to(device, non_blocking=True)
+        for batch in tr:
+            x = batch[0].to(device, non_blocking=True)
+            t = batch[1].to(device, non_blocking=True)
+            # Measured once, on the first batch of the run, and then compared
+            # against the switch. The abort is deliberate and it is hard: a
+            # mismatch here means the resolution of this run is not the
+            # resolution its result row will claim, and every paired comparison
+            # built on that row would be wrong in a way nobody could find
+            # afterwards. Better a run that dies in the first minute.
+            if input_px == 0:
+                input_px = int(x.shape[-1])
+                print(f"  input {input_px} x {int(x.shape[-2])} px, measured on "
+                      f"the first batch (--size {args.size})")
+                if input_px != int(args.size) or int(x.shape[-2]) != int(args.size):
+                    raise SystemExit(
+                        f"ABORT: --size says {args.size}, the model receives "
+                        f"{int(x.shape[-2])} x {input_px}. The switch is not "
+                        f"reaching the transform.")
             opt.zero_grad(set_to_none=True)
-            loss = crit(model(x).squeeze(1), t)
+            if not args.head:
+                loss = crit(model(x).squeeze(1), t)
+                l_loc = torch.zeros((), device=device)
+            else:
+                target = batch[2].to(device, non_blocking=True)
+                used = batch[3].to(device, non_blocking=True).float()
+                logit, field = model(x)
+                l_cls = crit(logit.squeeze(1), t)
+                l_loc = loc_loss(field, target, used, crit_loc)
+                # THE ONE PLACE lambda is decided, and it is decided by
+                # measurement: scale the localisation loss so that both start
+                # at the same size. "Equally weighted" is then a fact about
+                # this run rather than a claim about the intention, and it is
+                # reproducible instead of guessed. Fixed after this batch and
+                # never touched again, because a lambda that keeps adjusting
+                # would make the two losses trade places during training and no
+                # comparison would mean anything.
+                #
+                # The condition is `used.sum() > 0`, not "this is batch one".
+                # With --head-negatives exclude an image without a box
+                # contributes nothing, so a batch that holds no annotated image
+                # returns a localisation loss of exactly zero and the ratio
+                # becomes whatever the clamp at 1e-8 makes of it. See loc_loss
+                # for how often that is.
+                #
+                # Waiting for the next batch changes nothing else. The skipped
+                # batch has a localisation loss of exactly zero, so
+                # `l_cls + lam * l_loc` equals `l_cls` whatever lam holds, and
+                # its gradient is the same either way. For a first batch that
+                # does carry an annotated image this branch behaves exactly as
+                # it did before, which is what keeps folds comparable.
+                if lam == 0.0 and batch_can_set_lambda(used):
+                    lam = float((l_cls.detach() / l_loc.detach().clamp(min=1e-8)).cpu())
+                    lam_batch = n_batch + 1
+                    print(f"    lambda measured on batch {lam_batch}: "
+                          f"{lam:.4f}  "
+                          f"(classification {float(l_cls.detach()):.4f}, "
+                          f"localisation {float(l_loc.detach()):.4f})")
+                    if lam_batch > 1:
+                        print(f"    batch 1 carried no annotated image, so the "
+                              f"measurement moved to batch {lam_batch}. The "
+                              f"batches before it gave the head no gradient.")
+                    if not LAMBDA_MIN <= lam <= LAMBDA_MAX:
+                        raise SystemExit(
+                            f"ABORT: lambda {lam:.4g} lies outside "
+                            f"[{LAMBDA_MIN:g}, {LAMBDA_MAX:g}]. The two losses "
+                            f"do not start at the same size, so this run would "
+                            f"not be comparable with the others. Nothing has "
+                            f"been written yet.")
+                loss = l_cls + lam * l_loc
             loss.backward()
             opt.step(); sched.step()
-            loss_sum += loss.detach(); n_batch += 1
+            loss_sum += loss.detach(); loc_sum += l_loc.detach(); n_batch += 1
+        # An epoch in which not one batch carried an annotated image would
+        # leave lambda at 0, the head would get no gradient at all, and the run
+        # would look normal to the end. It cannot happen with these splits, but
+        # a silent zero is the failure mode this whole block exists against.
+        if args.head and lam == 0.0:
+            raise SystemExit(
+                "ABORT: no batch of this epoch carried an annotated image, so "
+                "lambda was never measured and the head never trained.")
         train_loss = float(loss_sum.cpu()) / max(n_batch, 1)
+        train_loc = float(loc_sum.cpu()) / max(n_batch, 1)
         ps, ys = predict(model, sel, device)
         a = roc_auc_score(ys, ps)
         improved = a > best_sel
@@ -836,6 +1585,11 @@ def main() -> None:
         history.append({
             "fold": args.fold, "seed": args.seed, "epoch": ep + 1,
             "train_loss": train_loss,
+            # Logged separately, because the combined loss cannot show whether
+            # the head is learning at all. A localisation loss that sits still
+            # while the total falls is the box trap showing itself in the only
+            # place it ever shows.
+            "train_loc_loss": train_loc if args.head else float("nan"),
             "sel_loss": bce_from_probs(ys, ps, float(pos_weight.item())),
             "sel_auc": float(a),
             "lr": lr_now, "sec": dt,
@@ -845,6 +1599,7 @@ def main() -> None:
         print(f"  epoch {ep + 1}/{args.epochs}  sel AUC {a:.4f}  "
               f"train loss {history[-1]['train_loss']:.4f}  "
               f"sel loss {history[-1]['sel_loss']:.4f}"
+              f"{f'  loc {train_loc:.4f}' if args.head else ''}"
               f"{'  <-- best so far' if improved else ''}  "
               f"[{dt:.0f}s, ~{dt * (args.epochs - ep - 1) / 60:.0f} min left]")
 
@@ -862,7 +1617,11 @@ def main() -> None:
                    for v in ("AP", "PA")
                    if (vp_sel == v).sum() >= 50
                    and len(np.unique(y_sel[vp_sel == v])) > 1}
-    p_val, y = predict(model, va, device)
+    if args.head:
+        p_val, y, val_fields = predict(model, va, device, fields=True)
+    else:
+        p_val, y = predict(model, va, device)
+        val_fields = None
 
     vp = np.array([vpmap[i] for i in val_ids])
     res = scores(y, p_val, thr)
@@ -871,6 +1630,55 @@ def main() -> None:
                 "auc_last": auc_last, "auc_sel": float(best_sel),
                 "best_epoch": best_ep + 1, "n_fit": len(fit_ids),
                 "n_sel": len(sel_ids), "n_val": len(val_ids),
+                # Which chip computed this row. Empty in every row written
+                # before 02.08.2026, and empty there means adapter 0, the
+                # integrated graphics. Two rows may only be compared when
+                # these two fields agree; see erklaerungen/12_hardwarewechsel.md.
+                "device_name": dev_label,
+                "dml_index": (args.dml_index if str(device).startswith("privateuseone")
+                              else -1),
+                # WHICH ARM this row is, and which files carry it. Until phase 5
+                # the tag lived only in the checkpoint FILE NAME, so from a row
+                # in results_rsna.csv there was no way back to its weights. With
+                # three arms writing into one CSV that stops being a detail: the
+                # arms are otherwise only told apart indirectly, through the
+                # combination of head, head_negatives, balance_view and
+                # dml_index, and that combination stops being unique the moment
+                # a fourth arm repeats it.
+                #
+                # Same lesson as `dml_index` right above: provenance that lives
+                # only in a command line is provenance that gets lost. This
+                # project has already overwritten five checkpoints unnoticed.
+                #
+                # Empty in every row written before 04.08.2026. Empty there
+                # means the default tag, so predictions_rsna/ for the old rows.
+                "tag": args.tag,
+                "pred_dir": str(args.pred_dir),
+                "ckpt": str(ckpt),
+                # WHICH PIXELS and WHICH BOXES this row was trained on. Added
+                # 07.08.2026 for phase 7, for the same reason that put
+                # `dml_index`, `tag` and the four `aug_*` columns here:
+                # provenance that lives only in a command line is provenance
+                # that gets lost.
+                #
+                # Phase 7 has exactly ONE lever and it is these two paths. An
+                # arm that accidentally trained on png512 would produce a clean
+                # looking null result, and nothing anywhere in the output would
+                # contradict it. That is the phase 6 `staerke_pruefen` problem
+                # one level deeper: there the lever at least had four columns.
+                #
+                # Empty in every row written before 07.08.2026, and empty there
+                # means the defaults, data/rsna/png512 and data/rsna.
+                "images": str(args.images),
+                "csv": str(args.csv),
+                # WHICH RESOLUTION, added 08.08.2026 for phase 8, and for the
+                # same reason as the two lines above: `results_rsna.csv` had 76
+                # columns and not one of them named the edge length. `size` is
+                # the switch, `input_px` is what the model actually got, and
+                # the run aborts if they disagree. Empty in every row written
+                # before 08.08.2026, and empty there means 224.
+                "size": int(args.size),
+                "input_px": int(input_px),
                 # Goes into results_rsna.csv so that a row can never be
                 # mistaken for a baseline row later on.
                 "balance_view": int(args.balance_view),
@@ -882,7 +1690,39 @@ def main() -> None:
                 "balance_residual_auc": residual_view_label_auc(y_fit, vp_fit,
                                                                 w_fit),
                 "n_fit_effective": (effective_n(w_fit) if w_fit is not None
-                                    else float(len(fit_ids)))})
+                                    else float(len(fit_ids))),
+                # The head, in the data rather than in a file name. Same
+                # lesson as `dml_index`: provenance that lives only in a
+                # command line is provenance that gets lost.
+                "head": int(args.head),
+                "head_grid": int(args.head_grid) if args.head else 0,
+                "head_negatives": args.head_negatives if args.head else "",
+                # The augmentation strength, in the data and not only in the
+                # command line. Old rows leave these empty, and empty means the
+                # default, which is what every run up to phase 5 used.
+                "aug_translate": float(args.aug_translate),
+                "aug_scale_lo": float(args.aug_scale[0]),
+                "aug_scale_hi": float(args.aug_scale[1]),
+                "aug_degrees": float(args.aug_degrees),
+                # THE PHOTOMETRIC STRENGTH, added 09.08.2026 for phase 9. Two
+                # switches and two MEASURED values, the same pairing as
+                # `size`/`input_px`: the first says what the run believed it
+                # was doing, the second is the spread of the factors the
+                # transform in the loader really drew. Empty in every row
+                # written before 09.08.2026, and empty there means 0.15.
+                "aug_brightness": float(args.aug_brightness),
+                "aug_contrast": float(args.aug_contrast),
+                "aug_brightness_measured": float(b_gemessen),
+                "aug_contrast_measured": float(c_gemessen),
+                "head_lambda": float(lam) if args.head else float("nan"),
+                "head_lambda_measured": int(args.head and args.head_lambda == 0.0),
+                # Which batch it came from. 1 is the normal case, 0 means the
+                # value was entered by hand, and anything above 1 says the
+                # first batch held no annotated image. Without this column that
+                # fact lives only in a log line.
+                "head_lambda_batch": int(lam_batch) if args.head else 0,
+                "head_tile_pos_weight": float(tile_w) if args.head else float("nan"),
+                "head_tile_coverage": float(tile_cov) if args.head else float("nan")})
 
     # The primary endpoint, computed here as well so it is visible in the run
     # instead of only after rsna_crop_compare.py. Same definition as
@@ -945,8 +1785,13 @@ def main() -> None:
     cam_df = pd.DataFrame()
     if args.cam_n:
         print(f"\n  Grad-CAM on {args.cam_n} positive val images (CPU)...")
-        boxes = load_boxes(args.csv)
-        cam_res, cam_df = cam_vs_boxes(model, args.images, val_ids, boxes,
+        cam_boxes = boxes if boxes is not None else load_boxes(args.csv)
+        # The two-headed model goes in through ClassifierView, so Grad-CAM sees
+        # the same plain classifier it sees in the other arm. This is the
+        # middle row of the three-way table in the roadmap and the only one
+        # that compares two MODELS rather than two INSTRUMENTS.
+        cam_model = ClassifierView(model) if args.head else model
+        cam_res, cam_df = cam_vs_boxes(cam_model, args.images, val_ids, cam_boxes,
                                        args.size, args.cam_n, args.seed)
         res.update(cam_res)
         if cam_res:
@@ -973,6 +1818,15 @@ def main() -> None:
         args.pred_dir / f"sel_f{args.fold}_s{args.seed}.csv", index=False)
     if not cam_df.empty:
         cam_df.to_csv(args.pred_dir / f"cam_f{args.fold}_s{args.seed}.csv", index=False)
+    if val_fields is not None:
+        # Every validation image, not a sample: 3812 maps of 14 by 14 in float32
+        # are about 3 MB. Sampling here would mean retraining for every later
+        # question, and phase 5b (thresholds, connected tiles, IoU, mAP) is
+        # nothing but later questions about exactly this array.
+        np.savez_compressed(
+            args.pred_dir / f"head_f{args.fold}_s{args.seed}.npz",
+            patientId=np.array(val_ids), field=val_fields.astype(np.float32),
+            grid=np.int32(args.head_grid))
     # Already on disk from the epoch loop; rewritten here only so the file is
     # certainly the selected state even if the loop never improved.
     torch.save(best_state, ckpt)
