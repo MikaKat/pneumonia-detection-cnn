@@ -1,0 +1,19 @@
+{
+  "wann": "2026-08-09T15:52:48+00:00",
+  "erster_blick": true,
+  "arm": "_p5head_ex",
+  "n": 3812,
+  "images": "data/rsna/png512",
+  "size": 224,
+  "device": "directml:1 Radeon RX 5500 XT\u0000",
+  "checkpoints": {
+    "rsna_f0_s0_p5head_ex.pth": "7a181b7c4d4645ab",
+    "rsna_f1_s0_p5head_ex.pth": "58f4e099bdc65f52",
+    "rsna_f2_s0_p5head_ex.pth": "e266c95e83b075b4",
+    "rsna_f3_s0_p5head_ex.pth": "72b2f70bc80fa6ee",
+    "rsna_f4_s0_p5head_ex.pth": "27aa78cfed95dfb3"
+  },
+  "kalibrierung": "serving/model/kalibrierung_p10.json",
+  "schwelle": 0.20031082470732348,
+  "dauer_s": 141.8
+}

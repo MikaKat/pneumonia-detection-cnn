@@ -13,12 +13,23 @@ data/
 # Ausnahmen: genau die Dateien, die der Docker-Build per COPY braucht. Ohne sie
 # scheitert das Deployment mit "not found", weil der Build-Kontext nur enthaelt,
 # was auch im Repo liegt.
-#   rsna_f4_s0_bal10  der ausgelieferte Klassifikator (1 Logit, MODEL_FAMILY=rsna)
+#   rsna_f{0..4}_s0_p5head_ex  das Endmodell der Phase 10. Das Ensemble sind
+#               ALLE FUENF, nicht eines davon; fehlt eine einzige Ausnahme,
+#               liegt die Datei nicht im Repo, fehlt im Build-Kontext und der
+#               Build scheitert am COPY. Genau dieser Fall ist am 26.07. schon
+#               einmal eingetreten.
+#   rsna_f4_s0_bal10  der frueher ausgelieferte Klassifikator (1 Logit,
+#               MODEL_FAMILY=rsna)
 #   rsna_f4_s0        die Basislinie ohne Umgewichtung, weiter mitversioniert
 #   unet_best   der Lungenfinder; optional, ohne ihn entfaellt nur seine Karte
 #   best_model  die frueher ausgelieferte Kermany-Basislinie
 # (Bereits verfolgte Dateien beruehrt .gitignore ohnehin nicht -- die Zeilen
 # stehen hier, damit die Absicht sichtbar bleibt.)
+!checkpoints/rsna_f0_s0_p5head_ex.pth
+!checkpoints/rsna_f1_s0_p5head_ex.pth
+!checkpoints/rsna_f2_s0_p5head_ex.pth
+!checkpoints/rsna_f3_s0_p5head_ex.pth
+!checkpoints/rsna_f4_s0_p5head_ex.pth
 !checkpoints/best_model.pth
 !checkpoints/rsna_f4_s0.pth
 !checkpoints/rsna_f4_s0_bal10.pth

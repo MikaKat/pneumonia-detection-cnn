@@ -1,0 +1,85 @@
+{
+  "erzeugt_von": "rsna/befunde/rsna_platt.py",
+  "vorfestlegung": "erklaerungen/29_phase10_final.md",
+  "arm": "_p5head_ex",
+  "pred_dir": "predictions_final_model",
+  "checkpoints": [
+    "checkpoints/rsna_f0_s0_p5head_ex.pth",
+    "checkpoints/rsna_f1_s0_p5head_ex.pth",
+    "checkpoints/rsna_f2_s0_p5head_ex.pth",
+    "checkpoints/rsna_f3_s0_p5head_ex.pth",
+    "checkpoints/rsna_f4_s0_p5head_ex.pth"
+  ],
+  "platt": [
+    {
+      "fold": 0,
+      "a": 0.5809428850556021,
+      "b": -1.0344684452790784
+    },
+    {
+      "fold": 1,
+      "a": 0.5512066800950502,
+      "b": -0.7835252981165084
+    },
+    {
+      "fold": 2,
+      "a": 0.6923938890501667,
+      "b": -0.8096215192908676
+    },
+    {
+      "fold": 3,
+      "a": 0.4957338016337948,
+      "b": -0.7387436133543237
+    },
+    {
+      "fold": 4,
+      "a": 0.8283144233238171,
+      "b": -1.4498154833747867
+    }
+  ],
+  "schwelle": 0.20031082470732348,
+  "schwelle_herkunft": "Youden auf den kalibrierten Vorhersagen-ohne-Training, 22872 Entwicklungsbilder, gemeinsam ueber beide Aufnahmearten",
+  "dev": {
+    "n": 22872,
+    "praevalenz": 0.22534102833158448,
+    "mittel_roh": 0.33420959505349657,
+    "mittel_kal": 0.22547610679808106,
+    "brier_roh": 0.14868535913343173,
+    "brier_kal": 0.11956867999588683,
+    "ece_roh": 0.11473419631611101,
+    "ece_kal": 0.00939155735457272,
+    "a_roh": 0.8310544028470516,
+    "a_kal": 0.8352653679549378
+  },
+  "dev_bei_schwelle": {
+    "sens": 0.8463329452852154,
+    "spez": 0.724856078564172,
+    "je_view": {
+      "AP": {
+        "n": 10434,
+        "praevalenz": 0.3831704044470002,
+        "sens": 0.8786893446723362,
+        "spez": 0.5798632691112492
+      },
+      "PA": {
+        "n": 12438,
+        "praevalenz": 0.09294098729699309,
+        "sens": 0.7344290657439446,
+        "spez": 0.8075695798617266
+      }
+    },
+    "sens_luecke": 0.14426027892839155
+  },
+  "quellen": {
+    "sel_f0_s0.csv": "5da98247e6a58198",
+    "rsna_f0_s0.csv": "3b3974582759e169",
+    "sel_f1_s0.csv": "826bd8fe41ec9950",
+    "rsna_f1_s0.csv": "61b97df5357018a7",
+    "sel_f2_s0.csv": "cb6b827c42448fe3",
+    "rsna_f2_s0.csv": "54d0a6e747689a52",
+    "sel_f3_s0.csv": "3be065a06e246b36",
+    "rsna_f3_s0.csv": "bdf3b1184da73b86",
+    "sel_f4_s0.csv": "8dab031599fdf645",
+    "rsna_f4_s0.csv": "004df03ddcafbd27"
+  }
+}
