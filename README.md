@@ -1,76 +1,256 @@
 # Pneumonia detection on chest radiographs
 
-A convolutional neural network that scores frontal chest radiographs for pneumonic
-consolidation. It reaches an AUC of **0.845** on patients it was never trained on (five
-folds, patient-grouped), and **0.885** on a different population from another continent,
-after correcting for a metadata leak that inflates the raw external figure to 0.923.
+A convolutional network that scores frontal chest radiographs for pneumonic
+consolidation and, at the same time, says where. The deployed model is an
+ensemble of five calibrated networks. It reaches a stratified AUC of **0.869** on
+3,812 held-out images that were sealed on the first day and opened exactly once,
+at the end.
 
-Those two numbers are not the subject of this repository. The subject is what sits next to
-them: what a model with no access to the image at all scores on the same data, which
-shortcuts the model was found to take, which preprocessing ideas were refuted by
-measurement, and why a model that discriminates well can still be unsafe to deploy.
-
-The project was built by a freshly graduated doctor entering the clinical work life, in order to learn how these systems
-behave rather than to ship a product.
+The project was built by a freshly graduated doctor entering the clinical work
+life, in order to learn how these systems behave rather than to ship a product.
 
 > Not a medical device. Research demonstrator. No diagnostic use.
+
+Contents. [Terms](#terms) · [How the model is built](#how-the-model-is-built)
+· [How it was trained](#how-it-was-trained) · [Where the data comes
+from](#where-the-data-comes-from) · [Results](#results) · [External
+validation](#external-validation) · [What was tried and did not
+work](#what-was-tried-and-did-not-work) · [Limitations](#limitations) ·
+[Repository](#repository)
 
 ---
 
 ## Terms
 
-Four terms carry the whole document. Readers who know them can skip ahead.
+Five terms carry the whole document. Readers who know them can skip ahead.
 
-AUC (area under the ROC curve) is the probability that a randomly chosen patient with
-pneumonia gets a higher score than a randomly chosen patient without it. It is the same
-quantity as Harrell's c-statistic. 1.0 is perfect and 0.5 is a coin flip. The 0.5 is the
-number that matters here, because it is what "knows nothing" looks like.
+AUC (area under the ROC curve) is the probability that a randomly chosen patient
+with pneumonia gets a higher score than a randomly chosen patient without it. It
+is the same quantity as Harrell's c-statistic. 1.0 is perfect and 0.5 is a coin
+flip. The 0.5 is the number that matters here, because it is what "knows
+nothing" looks like.
 
-A confounder is something that travels with the diagnosis but is not the diagnosis. On chest
-radiographs the largest one is projection: AP films are mostly taken supine with a portable
-unit, at the bedside, on sicker patients. A model can learn "this looks like a portable AP
-film" and score well without ever looking at the lung.
+A confounder is something that travels with the diagnosis but is not the
+diagnosis. On chest radiographs the largest one is projection: AP films are
+mostly taken supine with a portable unit, at the bedside, on sicker patients. A
+model can learn "this looks like a portable AP film" and score well without ever
+looking at the lung.
 
-Stratification is the corresponding correction. Instead of one AUC over everything, the AUC
-is computed within AP films and within PA films separately and then averaged. Inside a
-projection the confounder cannot help, so what survives is closer to radiology.
+Stratification is the corresponding correction. Instead of one AUC over
+everything, the AUC is computed within AP films and within PA films separately
+and then averaged. Inside a projection the confounder cannot help, so what
+survives is closer to radiology.
 
-Grad-CAM is a heat map showing which image regions drove the score. A plausible-looking heat
-map is easy to produce and easy to over-read, so it is scored here against the
-radiologist-drawn bounding boxes and against chance rather than shown as a picture on its
-own.
+Calibration is a separate property from discrimination, and the two are routinely
+confused. Discrimination asks whether the ranking is right; calibration asks
+whether a displayed 35% means that 35 in 100 such films really have pneumonia. A
+model can rank perfectly and still be wrong about every probability it prints,
+and this one was.
 
----
-
-## Summary
-
-|                                           |                                                                                          |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Data                                      | RSNA Pneumonia Detection Challenge: 26,684 adult chest radiographs, multi-centre, DICOM  |
-| Split                                     | 22,872 development images, patient-grouped, 5 folds · 3,812 holdout images never touched |
-| Stratified AUC                            | **0.845 ± 0.015** (mean ± SD across 5 folds)                                             |
-| Unstratified AUC                          | 0.880 ± 0.009                                                                            |
-| Header-only baseline, same stratification | **0.557**, a model that sees no pixels, only DICOM metadata (unstratified: 0.729)        |
-| Margin over that baseline                 | **0.288 ± 0.011**                                                                        |
-| External validation                       | **0.885** on 5,856 paediatric films from a different continent, leak-adjusted            |
-| Localisation                              | Grad-CAM peak inside the annotated box 4.6× chance, but its mass only 1.6×               |
-| Deployment readiness                      | **No.** Transferring the decision threshold gives NPV 0.500 (see finding 6)              |
-
-The margin is the informative headline. 0.845 alone would flatter the model: a classifier fed
-nothing but the DICOM header already reaches 0.557 on the same stratified comparison, because
-sicker patients get portable AP films. What the images contribute is the difference.
-
-That margin is also the more stable measurement. Its spread across folds is 25% smaller than
-the raw stratified AUC's (0.011 against 0.015), because fold difficulty cancels out. Fold 1
-looked like a better model until the pixel-blind baseline rose on that fold too. Its
-validation set was simply easier.
+Grad-CAM is a heat map showing which image regions drove the score. It is
+extracted from a network that was never asked for a location. This project also
+asks directly, with a second output trained against the radiologist boxes, and
+the difference between the two is one of its findings.
 
 ---
 
-## Data sources
+## How the model is built
 
-Nothing here ships image data. All three sets are public and have to be downloaded from the
-source, which is also where their licences and terms of use are stated.
+### The trunk: ResNet-18
+
+The backbone is a ResNet-18, initialised from ImageNet weights.
+
+A convolutional network reads an image through small learned filters. Early
+layers respond to edges and local texture; each following block halves the
+spatial resolution and doubles the number of channels, so later layers see less
+of the picture in detail and more of it at once. By the end, a 224 by 224 film
+has become a 7 by 7 grid of 512 numbers per position, and those numbers describe
+regions rather than pixels.
+
+The "residual" part is what makes 18 layers trainable at all. Each block
+computes a correction and adds it to its own input rather than replacing it, so
+a block that has nothing useful to contribute can pass its input through
+unchanged. Without that shortcut, deep stacks train worse than shallow ones.
+
+The four blocks are named `layer1` to `layer4`. Their output sizes at a 224 by
+224 input matter for what follows:
+
+| Stage | Output | Channels |
+| --- | --- | --- |
+| stem (conv, batchnorm, max pool) | 56 x 56 | 64 |
+| `layer1` | 56 x 56 | 64 |
+| `layer2` | 28 x 28 | 128 |
+| `layer3` | 14 x 14 | 256 |
+| `layer4` | 7 x 7 | 512 |
+
+ImageNet initialisation means the filters start out already able to see edges,
+texture and shape, learned on photographs. Radiographs are not photographs, but
+the early filters transfer well enough that this is worth far more than starting
+from noise on a dataset of this size.
+
+### Head one: the diagnosis
+
+`layer4` is averaged over its 7 by 7 positions into a single 512-number vector
+and passed through one linear layer to one logit. One and not two: the task
+is binary, and a single logit with a sigmoid is the form that lets the class
+imbalance be corrected with `pos_weight` in the loss.
+
+### Head two: where
+
+The second output is a **14 by 14 field**, one number per tile, saying how likely
+that tile is to contain the opacity. It is a single 1 by 1 convolution on the
+256 channels of `layer3`, which is a logistic regression per tile and nothing
+more.
+
+Two decisions in that sentence are load-bearing.
+
+It taps `layer3` and not `layer4`. At 224 pixels `layer3` is already 14 by
+14, which is the chosen grid, so nothing in the trunk has to be changed to get
+it. Reaching 14 from `layer4` would have meant changing that block's stride,
+which changes the diagnosis path too, and then the comparison against the same
+network without a head would have had two differences instead of one.
+
+It pools to a fixed grid. `adaptive_avg_pool2d` to 14 by 14 means the head
+keeps its grid whatever the input size. At 512 pixels `layer3` delivers 32 by 32
+and is pooled down. The measuring stick therefore stops moving with the thing it
+measures, which is what made the resolution experiment interpretable.
+
+It is the smallest thing that could do the job, deliberately. Anything deeper
+would have made "does supervision help" and "does more capacity help" the same
+experiment.
+
+```
+                    ┌─ layer4 ─ avgpool ─ linear ──────────► 1 logit    (diagnosis)
+input ─ stem ─ layer1 ─ layer2 ─ layer3 ─┤
+                                          └─ 1x1 conv ──────► 14x14 field (location)
+```
+
+Both heads share everything up to `layer3`. That is not an implementation
+convenience: the localisation supervision reaches back into the shared trunk and
+measurably improves what the diagnosis path looks at, which is reported below.
+
+### What is actually deployed: five of them
+
+The shipped model is an ensemble of the five fold models, each Platt-calibrated
+on its own held-out selection split, and the five probabilities are averaged.
+
+Calibrating first and averaging second is not interchangeable with the reverse.
+The average of five calibrated probabilities is itself approximately calibrated;
+an average of raw scores is on no particular scale. The threshold, 0.2003, comes
+from the development data alone and was fixed before the holdout was touched.
+Weights, curves and threshold live together in one file,
+[`serving/model/kalibrierung_p10.json`](serving/model/kalibrierung_p10.json),
+because three numbers that only make sense together should not be three separate
+settings.
+
+---
+
+## How it was trained
+
+The whole recipe below is one script,
+[`train_final_model.ps1`](train_final_model.ps1), and it is the only training
+entry point in the repository. Everything in the results section comes out of
+it. Five folds take about three and a half hours on the hardware described at
+the end; finished folds are skipped, so it can be interrupted.
+
+### Preprocessing
+
+RSNA ships DICOM. It is converted once to 512 by 512 PNG (`rsna_prepare.py`) as
+a faithful downscale: no contrast equalisation, no normalisation, no crop. Every
+preprocessing decision belongs in the dataset transform instead, where it can be
+switched per run and therefore compared. On the first dataset CLAHE was baked
+into the conversion, after which preprocessing and data could no longer be told
+apart.
+
+Training then reads those PNGs as greyscale, resizes to 224 by 224 and
+normalises with **fixed ImageNet statistics**, not with statistics computed per
+image. That looks like the worse choice and was measured to be the better one:
+per-image normalisation makes the projection channel stronger, because the
+statistic is computed from the image and how much abdomen, shoulder and black
+border an image contains depends on the projection.
+
+### Augmentation
+
+Rotation up to 7 degrees, translation up to 3 percent, scale 0.93 to 1.07,
+brightness and contrast jitter of 0.15.
+
+**No horizontal flipping.** It produces situs inversus, mirrors the cardiac
+silhouette and contradicts the side marker printed into the film.
+
+Image and box mask go through the same affine draw. Calling the transform
+twice draws twice and moves the two by different amounts, the box then sits where
+the opacity is not, the head is supervised against noise, and nothing in the
+output says so: the loss falls, the run finishes, only the map stays diffuse.
+
+### The loss
+
+Binary cross-entropy on the logit with `pos_weight` set to the
+negative-to-positive ratio of the fitting split, plus a second binary
+cross-entropy on the head field, weighted by a lambda **measured from the first
+training batch** rather than chosen, so that the two terms start at comparable
+magnitudes. Only films that carry a box contribute to the localisation term.
+
+Optimiser AdamW, learning rate 3e-4, weight decay 1e-4, one-cycle schedule,
+8 epochs, batch size 16.
+
+### Decoupling projection from diagnosis in the sampling stream
+
+The model reads the projection not because it is visible but because it is
+useful: in the training stream `ViewPosition` predicts the label at AUC 0.706.
+Three attempts to remove that information from the pixels had failed, so the
+training addresses the incentive instead.
+
+Each training image is drawn with the weight a chi-square test is built on, the
+count expected under independence over the count observed:
+
+    w(v, y) = n_v * n_y / (N * n_vy)
+
+Both marginals stay exactly as they were, the overall prevalence of 0.225 and the
+AP to PA ratio. Only the association between them is cut, from 0.706 to exactly
+0.500. That leaves `pos_weight` valid, so the class imbalance is not corrected
+twice. Weights come from the fitting split of the current fold alone.
+
+It works, and it is the only thing in this project that ever moved the
+confounder. It is also paid for: see [what did not
+work](#what-was-tried-and-did-not-work) for the price and the failed
+pre-registration behind it.
+
+### Splitting
+
+`StratifiedGroupKFold` over patient identifiers: five outer folds over the 22,872
+development images. Within the training part of each fold, a further
+patient-grouped selection split chooses the checkpoint, the calibration curve and
+the threshold. The outer fold is reported and never optimised against.
+
+3,812 images were sealed off entirely. The mechanical part of that claim: the
+word `holdout` does not appear anywhere in `rsna_train.py`, the only file that
+trains or evaluates. The training script cannot touch the holdout because it does
+not know it exists.
+
+### The label decision that shapes everything
+
+RSNA labels each film `Normal`, `Lung Opacity` (infiltrate, with a box), or
+`No Lung Opacity / Not Normal`, meaning abnormal but not pneumonia. That middle
+class is about 11,800 of 26,684 images.
+
+> Here: `Lung Opacity` = 1. `Normal` and the middle class = 0.
+
+Clinically the question is "pneumonia, yes or no", not "ill, yes or no". Dropping
+the middle class answers the second while claiming to have answered the first.
+
+It is also measurable. Removing the middle class pushes the header-only
+confounder from 0.729 to 0.824, because 48.2 percent of AP films are middle
+class: sick patients at the bedside without pneumonia, the counterexamples that
+stop "AP" from collapsing into "pneumonia". Choosing the easier task buys a
+shortcut worth 0.095 AUC.
+
+---
+
+## Where the data comes from
+
+Nothing here ships image data. All three sets are public and have to be
+downloaded from the source, which is also where their licences and terms of use
+are stated.
 
 | Set | Used for | Source |
 | --- | --- | --- |
@@ -78,496 +258,382 @@ source, which is also where their licences and terms of use are stated.
 | Kermany paediatric chest X-ray | external validation only, and the first dataset the project ran on | [data.mendeley.com/datasets/rscbjbr9sj](https://data.mendeley.com/datasets/rscbjbr9sj/2) |
 | Montgomery County and Shenzhen | the lung segmenter (U-Net), which the web app shows but which scores nothing | [data.lhncbc.nlm.nih.gov/public/Tuberculosis-Chest-X-ray-Datasets](https://data.lhncbc.nlm.nih.gov/public/Tuberculosis-Chest-X-ray-Datasets/) |
 
-Papers behind them, in the same order: Shih et al., *Augmenting the National Institutes of
-Health Chest Radiograph Dataset with Expert Annotations of Possible Pneumonia*, Radiology:
-Artificial Intelligence 2019. Kermany et al., *Identifying Medical Diagnoses and Treatable
-Diseases by Image-Based Deep Learning*, Cell 2018. Jaeger et al., *Two public chest X-ray
-datasets for computer-aided screening of pulmonary diseases*, Quantitative Imaging in
-Medicine and Surgery 2014.
+Papers behind them, in the same order: Shih et al., *Augmenting the National
+Institutes of Health Chest Radiograph Dataset with Expert Annotations of Possible
+Pneumonia*, Radiology: Artificial Intelligence 2019. Kermany et al., *Identifying
+Medical Diagnoses and Treatable Diseases by Image-Based Deep Learning*, Cell
+2018. Jaeger et al., *Two public chest X-ray datasets for computer-aided
+screening of pulmonary diseases*, Quantitative Imaging in Medicine and Surgery
+2014.
 
-The Kermany set appears twice on purpose, and the distinction matters for reading finding 7:
-it was the project's starting point, it was abandoned once its file dimensions turned out to
-give the answer away (finding 1), and it comes back only as a held-out external test set that
-no training run ever saw.
+The Kermany set appears twice on purpose. It was the project's starting point, it
+was abandoned once its file dimensions turned out to give the answer away, and it
+comes back only as a held-out external test set that no training run ever saw.
+Details in [`archiv/kermany`](archiv/kermany/).
 
----
-
-## What the model does
-
-The input is a frontal chest radiograph. RSNA ships DICOM, which is converted once to
-512×512 PNG (`rsna_prepare.py`). The conversion is a faithful downscale: no contrast
-equalisation, no normalisation, no crop. Every preprocessing decision belongs in the dataset
-transform instead, where it can be switched per run and therefore compared. On the first
-dataset CLAHE was baked into the conversion, after which preprocessing and data could no
-longer be told apart.
-
-Training reads those PNGs at 224×224 and normalises with fixed ImageNet statistics, not with
-statistics computed per image (finding 4 gives the reason). Augmentation is small and
-geometric: rotation up to 7°, translation up to 3%, scale 0.93 to 1.07, brightness and
-contrast jitter of 0.15. Horizontal flipping is deliberately absent, because of situs
-inversus and the burnt-in side markers.
-
-The network is a ResNet-18 initialised from ImageNet weights, with the final layer replaced
-by a single logit. The loss is binary cross-entropy with `pos_weight` set to the
-negative-to-positive ratio of the fitting split. Optimiser AdamW, learning rate 3e-4, weight
-decay 1e-4, one-cycle schedule, 8 epochs, batch size 16.
-
-Splitting is `StratifiedGroupKFold` over patient identifiers: five outer folds over the
-22,872 development images. Within the training part of each fold, a further patient-grouped
-selection split chooses the checkpoint and the decision thresholds. The outer fold is
-reported and never optimised against. 3,812 images are sealed off entirely.
-
-Each run writes a metrics row to `results_rsna.csv`, per-image scores for both the reporting
-and the selection split, a per-epoch history, the Grad-CAM table, and the weights of the
-selected epoch. Because every score reaches disk, a follow-up question costs a re-analysis
-instead of a retraining run.
-
-Three evaluations run alongside every training run:
-
-- the stratified AUC, computed within AP and within PA films and then averaged;
-- Grad-CAM peak and mass against the radiologist-drawn boxes, each against the chance level
-  given by the box area;
-- a perturbation battery (blanked corners, zoom, shift, rotation, contrast and brightness
-  change, blur, resolution loss) reporting how much of the score survives each manipulation.
-
-The demo application in `webapp/` returns a probability with its uncertainty and a heat map.
-It never returns a binary label; finding 6 is the reason.
+| | RSNA | |
+| --- | --- | --- |
+| total labelled images | 26,684 | |
+| development, five patient-grouped folds | 22,872 | prevalence 0.225 |
+| holdout, opened once | 3,812 | 1,739 AP, 2,073 PA |
 
 ---
 
-## The task, and the one decision that shapes it
+## Results
 
-RSNA labels each film as `Normal`, `Lung Opacity` (infiltrate, with a radiologist-drawn box),
-or `No Lung Opacity / Not Normal`, meaning abnormal but not pneumonia. That middle class is
-~11,800 of the 26,684 images, and its treatment decides what the model learns.
+Everything below was measured once, on the sealed set, after the model, the
+curves and the threshold had been written to disk. The full run is in
+[`predictions_holdout/`](predictions_holdout/).
 
-> Here: `Lung Opacity` = 1. `Normal` and the middle class = 0.
+### The primary endpoint
 
-Clinically the question is "pneumonia, yes or no", not "ill, yes or no". Dropping the middle
-class answers the second question while claiming to have answered the first.
+| | measured | registered in advance |
+| --- | --- | --- |
+| **stratified AUC, ensemble** | **0.8687** [0.8566, 0.8805] | lower interval bound above 0.80 |
+| stratified AUC, single models | 0.8473 | 0.8368 on average |
+| score to projection | 0.7501 [0.7391, 0.7610] | around 0.75 |
+| calibration error after Platt | 0.0260 | below 0.03 good, above 0.05 a finding |
 
-The choice is also measurable. Removing the middle class pushes the header-only confounder
-from 0.729 to 0.824. The apparently cleaner task is the more biased one, and the reason is in
-the cross-tabulation: 48.2% of AP films are middle class. Those are sick patients at the
-bedside without pneumonia, the counterexamples that stop "AP" from collapsing into
-"pneumonia". Delete them and projection alone predicts opacity in 74% of AP films. Choosing
-the easier task buys a shortcut worth 0.095 AUC.
+Intervals are 90 percent, from a stratified bootstrap over images with 2,000
+draws. The bar of 0.80 was three fold standard deviations below the
+cross-validated estimate, and it was checked in advance that both outcomes were
+reachable: at the expected precision the lower bound would have landed near 0.83
+if the model held and below 0.80 if it did not.
+
+### The number that matters more than the headline
+
+Each of the five models against its own cross-validation figure:
+
+| fold | cross-validation | holdout | difference |
+| --- | --- | --- | --- |
+| 0 | 0.8211 | 0.8557 | +0.0346 |
+| 1 | 0.8426 | 0.8439 | +0.0013 |
+| 2 | 0.8479 | 0.8561 | +0.0082 |
+| 3 | 0.8407 | 0.8388 | -0.0018 |
+| 4 | 0.8316 | 0.8421 | +0.0104 |
+| **mean** | **0.8368** | **0.8473** | **+0.0105** |
+
+The cross-validated estimate was not optimistic. Nine phases of decisions were
+taken against a number that comes back on data none of those decisions could
+reach. No fold collapses; the worst sits 0.002 below its own estimate.
+
+What this does not establish: the holdout comes from the same collection, the
+same devices and the same labelling procedure. It answers whether the development
+process fitted itself to its own data, and the answer is no. It says nothing
+about a different hospital.
+
+### Against the null hypothesis
+
+A classifier fed nothing but the DICOM header, no pixels at all, reaches 0.557 on
+the same stratified comparison, because sicker patients get portable AP films.
+
+| Header feature | AUC to pneumonia |
+| --- | --- |
+| `ViewPosition` (AP/PA) | 0.706 |
+| age | 0.530 |
+| pixel spacing | 0.517 |
+| sex | 0.510 |
+| all combined | 0.729 (0.557 stratified) |
+
+The margin over that baseline is the informative headline, and it is also the
+more stable measurement: its spread across folds is 25 percent smaller than the
+raw stratified AUC's, because fold difficulty cancels out.
+
+### Calibration
+
+| on the holdout | raw | calibrated |
+| --- | --- | --- |
+| mean prediction (observed 0.2251) | 0.3279 | 0.2215 |
+| Brier score | 0.1272 | 0.1107 |
+| expected calibration error | 0.1029 | 0.0260 |
+
+The raw model holds patients to be considerably sicker than they are. That is not
+a bug but the side effect of weighting the rare class up so it is learned at all.
+Two parameters fitted on data the model never trained on remove it, and they
+still work on data the curve itself never saw.
+
+### Localisation
+
+All 5,154 positive validation images, five folds. The measure is the area under
+the curve over pixels inside a lung mask: draw one pixel inside a box and one
+outside, how often is the map higher inside. Chance is exactly 0.5.
+
+| | point AUC in the lung | hit rate |
+| --- | --- | --- |
+| **supervised head** | **0.9123** | |
+| location prior | 0.7520 | 0.5714 |
+| Grad-CAM, with the head | 0.7312 | 0.5982 |
+| lung map | 0.7011 | 0.5326 |
+| Grad-CAM, without the head | 0.6786 | 0.4212 |
+| chance | 0.5000 | 0.117 |
+
+The opponent is not chance, it is anatomy. The location prior is every training
+box drawn into one grid and averaged: a single fixed map, identical for every
+image, that knows nothing except where opacities usually sit. Grad-CAM alone sits
+**below** it. The supervised head is the first map in this project that clearly
+beats it, and it stays ahead in every quintile of how typical the box position is
+(0.8753 to 0.9355, while the prior runs 0.5124 to 0.9208).
+
+Adding the head costs nothing on the diagnosis: +0.0081 [+0.0014, +0.0149]
+stratified AUC, non-inferiority at a margin fixed beforehand. The honest sentence
+is "costs nothing", not "helps".
+
+The head is **not calibrated**, and this is why the application draws it as a
+gradient with no box and no cut-off: on films without pneumonia it lights up
+somewhere in 62 percent of cases. Scored as a detection task it reaches 0.136
+against 0.025 for the location prior, and almost half the loss is false alarms.
+Full numbers in [`archiv/03_zweiter_kopf`](archiv/03_zweiter_kopf/).
+
+### The threshold in practice, and why no label is shown
+
+At the pre-registered threshold of 0.2003:
+
+| | sensitivity | specificity | n | prevalence |
+| --- | --- | --- | --- | --- |
+| together | 0.8648 | 0.7282 | 3,812 | 0.225 |
+| AP films | 0.8814 | 0.5825 | 1,739 | 0.383 |
+| PA films | 0.8073 | 0.8113 | 2,073 | 0.093 |
+
+A single threshold at unequal prevalence is practically two different tests.
+Setting it per projection closes most of the gap and **cannot be deployed**: the
+application receives an uploaded PNG with no DICOM header and never learns the
+projection. That is the honest reason it reports a probability with its spread
+and never a yes or no.
 
 ---
 
-## Findings
+## External validation
 
-### 1. In the first dataset, the file dimensions gave the answer away
+Five RSNA-trained checkpoints, pure inference, no fine-tuning, on 5,856 Kermany
+images from 3,054 patient groups. Every axis shifts at once: adults to children
+aged 1 to 5, USA to Guangzhou, 1024² DICOM to JPEG of varying size, prevalence
+0.225 to 0.730.
 
-The project started on the Kermany paediatric dataset. The model classified well and Grad-CAM
-never pointed at anything. The reason:
+| | AUC |
+| --- | --- |
+| raw ensemble | 0.923 [0.916, 0.930], bootstrap grouped by patient |
+| single folds | 0.886 ± 0.019 |
+| metadata leak alone | 0.914 |
+| **leak-adjusted** | **0.885** |
+| internal comparison (RSNA, stratified) | 0.845 ± 0.015 |
 
-> The JPEG dimensions alone separate the classes at AUC 0.915. In the official test folder,
-> image width alone reaches 0.950, beating the CNN's 0.942.
+The ranking transfers. What that does not license is a clean "better than
+internal" claim: the external task has no middle class, which this project argues
+is the easier and more biased framing, and prevalence differs threefold. It reads
+as "no collapse across a hard domain gap", not as an improvement.
 
-This is not a bug in the code. NORMAL films carry systematically about 2.4× the pixel count
-of PNEUMONIA films (median 1654×1323 against 1160×776, so roughly 1.4× per side). Probably
-different acquisition setups, devices or age groups, though the dataset does not say and it
-could not be verified. Anything derivable from that size difference (texture sharpness,
-aspect ratio, even the shape of a lung mask) is a route to the right answer that has nothing
-to do with the chest.
+The leak is real and had to be corrected for. In the Kermany set the JPEG
+dimensions alone separate the classes at AUC 0.915; in the official test folder
+image width alone reaches 0.950, beating the CNN's own 0.942. Normal films carry
+about 2.4 times the pixel count of pneumonia films. That is why the project moved
+to RSNA, where every image is 1024 by 1024 and the confounders are written in the
+DICOM header, so they can be measured instead of reconstructed.
 
-This is why the project moved to RSNA, where every image is 1024×1024 and the confounders are
-written in the DICOM header, so they can be measured instead of reconstructed.
+One check is worth more than the headline: model score and leak are largely
+complementary channels. Model alone 0.923, dimensions alone 0.914, both
+together 0.966. If the model were simply re-reading the file dimensions, that
+increment would not exist. Complementary is what is measured; strict independence
+is not.
 
-### 2. The confounder that remained, and why it was stratified rather than hidden
+### And the part that says do not deploy this
 
-On RSNA the header-only classifier reaches 0.729, and it is almost entirely projection:
+Carrying the operating threshold across unchanged:
 
-| Header feature         | AUC → pneumonia |
-| ---------------------- | --------------- |
-| `ViewPosition` (AP/PA) | 0.706           |
-| age                    | 0.530           |
-| pixel spacing          | 0.517           |
-| sex                    | 0.510           |
-| all combined           | 0.729           |
-
-Within a single projection, the header-only score collapses to ~0.556 on the full set, and to
-0.557 averaged over the five validation folds, which is the figure used as the baseline above.
-The confounder is therefore binary and exactly known, which calls for stratification rather
-than matching. Matching on a continuous nuisance variable (as the first dataset required)
-discarded two thirds of the data; stratifying on a binary one does not cost a single image.
-
-+0.035 ± 0.006 of the headline number is projection (0.880 unstratified against 0.845
-stratified; in fold 0 alone it reaches 0.044). That is the difference between the number that
-could have been published and the number reported here.
-
-### 3. The model reads the lung, measurably but diffusely
-
-RSNA provides radiologist-drawn boxes, so the heat map can be scored instead of admired.
-
-|                            | measured      | chance        | ratio |
-| -------------------------- | ------------- | ------------- | ----- |
-| Grad-CAM peak inside a box | 0.539 ± 0.036 | 0.117 ± 0.005 | 4.6×  |
-| Grad-CAM mass inside a box | 0.192 ± 0.013 | 0.117 ± 0.005 | 1.6×  |
-
-The chance baseline is the fraction of image area the boxes cover, and it has to be reported.
-A hit rate of 0.6 sounds impressive and would be nearly nothing if the boxes covered 55% of
-the image.
-
-The reading the data supports: the peak lands on the pathology in just over half of cases
-(4.6× chance, but still only half), and the rest of the map is diffuse. That is a weaker and
-more accurate claim than "Grad-CAM looks plausible", which is what a gallery of cherry-picked
-heat maps would have supported. Both numbers replicated across five folds.
-
-Related: RSNA films carry burnt-in markers. Ablating the image corners changes the AUC by
--0.0001 ± 0.0009, about as precisely zero as an ablation can come out. No measurable
-contribution, which is a weaker statement than "the model ignores them", and the strongest one
-the measurement supports.
-
-### 4. The confounder cannot be removed from the images
-
-Three routes were tried and all three were refuted: pixel-exact lung masking, a rectangular
-lung crop, and per-image intensity normalisation. Each was the plan at some point, and each
-refutation turned out to be a more useful result than the plan would have been.
-
-Lung segmentation as preprocessing does not help here; it actively hurts. All three
-mechanisms by which it could have worked were refuted individually, which saved 11.5
-hours of compute that had already been scheduled. The decisive argument came from looking at
-the alternative: a rectangle around the lungs necessarily contains the mediastinum, but
-pixel-exact masking does not remove the mediastinum either. It turns it into a hole, and the
-shape of that hole is the cardiac and vascular silhouette. Masking may therefore not delete
-the confounder at all. It may re-encode it as a contour, and a contour is the easier feature
-for a convolutional network to read, not the harder one.
-
-Measured on 22,846 images, using three clinically readable properties of the cutout
-(cardiothoracic ratio, area, vertical position). No grey value enters:
-
-|                                           | AUC   | for comparison                     |
-| ----------------------------------------- | ----- | ---------------------------------- |
-| Cutout silhouette → projection            | 0.692 | framing of the rectangle: 0.714    |
-| Cutout silhouette → pneumonia, stratified | 0.593 | rectangle's crop parameters: 0.551 |
-
-Separately, masking would delete 12.9% of the annotated box area (7.8% into the mediastinal
-cutout, 5.1% beyond the lung outline altogether). So masking keeps about 90% of the
-above-chance projection signal (0.692 - 0.5 against 0.714 - 0.5), builds a stronger new
-shortcut than cropping does, and deletes an eighth of the finding. That eighth is concentrated
-rather than spread out: in 9.2% of positive films more than a fifth of the box lies in the
-mediastinal region. Those are the retrocardiac and paramediastinal consolidations.
-
-The gap between the two shortcut figures, silhouette 0.593 against crop parameters 0.551, is
-+0.042, bootstrap 95% CI [0.030, 0.051], so it is not a rounding artefact. These are three
-hand-picked summary numbers; a network would see the whole contour, so 0.692 and 0.593 are
-lower bounds.
-
-The rectangular crop was the second attempt. A square bounding box around the lung mask plus
-margin, precomputed rather than applied at run time, was evaluated over five folds at the
-same 8-epoch budget, paired within fold. The geometry checks done before training were favourable: the crop
-preserves 99.7% of annotated box area, and its parameters predict the class at 0.552
-stratified, so it builds no obvious shortcut of its own.
-
-The pre-registered primary endpoint was AUC(model score → `ViewPosition`), 0.8166 ± 0.0098,
-and it was to fall. It rose in all five folds, mean +0.027 (+0.011, +0.041, +0.004, +0.070,
-+0.010). Stratified and overall AUC did not move (+0.003 and +0.001).
-
-The mechanism is measurable. The side length of the crop window alone predicts AP against PA
-at AUC 0.685, against 0.714 for the framing as a whole. The adaptive crop takes almost the
-entire channel it was meant to close and writes it back into the image as a global
-magnification factor: AP films are enlarged 1.197× on average, PA films 1.117×. Texture
-frequency is easier for a convolutional network to read than framing, so the intervention made
-the endpoint worse rather than better.
-
-The margin is not the culprit, which was the obvious next suspicion:
-
-| margin                 | window side (median) | AUC(side → AP/PA) | box area below 90% preserved |
-| ---------------------- | -------------------- | ----------------- | ---------------------------- |
-| 0.05 (as run)          | 0.881                | 0.685             | 0.7%                         |
-| 0.02                   | 0.833                | 0.686             | 1.1%                         |
-| 0.00                   | 0.801                | 0.686             | 1.7%                         |
-| no dilation, no margin | 0.738                | 0.683             | 5.9%                         |
-
-Cropping tighter costs pathology and gains nothing at the confounder. Percentile rectangles
-(p1/p99 instead of min/max) are worse still, 0.704 and 0.711, because they couple window size
-more faithfully to true lung size, and lung size is the signal.
-
-The only neutral crop keeps the window size constant and takes only the position from the
-mask:
-
-| fixed side       | AUC(geometry → AP/PA) | box area preserved | below 90% |
-| ---------------- | --------------------- | ------------------ | --------- |
-| adaptive, as run | 0.714                 | 0.997              | 0.7%      |
-| 0.85             | 0.561                 | 0.998              | 0.5%      |
-| 0.80             | 0.554                 | 0.996              | 1.4%      |
-| 0.75             | 0.550                 | 0.989              | 3.2%      |
-| 0.70             | 0.549                 | 0.974              | 8.7%      |
-| 0.65             | 0.548                 | 0.942              | 22.4%     |
-
-Below a side of 0.75 the box preservation collapses. Neutral, however, is not better: a fixed
-side merely returns the channel to the level it has without any crop.
-
-The underlying reason is projective geometry rather than an artefact. Supine AP is taken at
-roughly 100 cm focus-film distance against roughly 180 cm for PA, so apparent lung size
-differs by projection, and no anatomical reference length is projection-independent. Every
-scale normalisation normalises the confounder along with it.
-
-Per-image normalisation, the third route, behaves the same way. Measured on 96 images
-(48 AP, 48 PA, noise about ±0.05), four intensity features taken inside the eroded lung mask
-predict AP against PA at 0.721 under the current fixed ImageNet normalisation, at 0.768 after
-per-image z-normalisation, and at 0.818 after CLAHE. Both supposed improvements make the
-channel stronger, because the normalisation statistic is computed from the image, and how much
-abdomen, shoulder and black border the image contains depends on the projection.
-
-A related trap is worth recording. Eight trivial whole-image statistics predict AP against PA
-at AUC 0.939, more than the model itself manages at 0.8166, with Laplace variance (sharpness)
-alone at 0.844. The same measurements inside the eroded lung mask give 0.561 for sharpness and
-0.572 for noise, which is close to nothing. The 0.844 comes from collimation edges, hardware,
-bed frame and border lettering on the supine films, not from lung markings. Any whole-image
-statistic on a radiograph measures the border first.
-
-The pattern across all three routes is the same, and it is now measured three times: a
-deterministic transform can re-encode information, it cannot delete it. Deleting requires
-either added noise (augmentation) or a constraint applied during training.
-
-A fourth prediction was refuted the same way. The Kermany aspect ratio differs strongly by class
-(mean 1.25 for normal films against 1.51 for pneumonia) and the pipeline stretches everything
-to a square, so class-correlated distortion was expected to hurt on external validation.
-Padding instead of stretching, over 5,856 images: -0.0001. Measured, discarded.
-
-### 5. External validation: the discrimination transfers
-
-Five RSNA-trained checkpoints, pure inference, no fine-tuning, on 5,856 Kermany images (3,054
-patient groups). Every axis shifts at once: adults → children aged 1 to 5, USA → Guangzhou,
-1024² DICOM → JPEG of varying size, prevalence 0.225 → 0.730.
-
-|                                                        | AUC                                                             |
-| ------------------------------------------------------ | --------------------------------------------------------------- |
-| Raw ensemble, 5 checkpoints                            | 0.923 [0.916 to 0.930], bootstrap grouped by patient            |
-| Single folds                                           | 0.886 ± 0.019, so ensembling is worth more here than internally |
-| Metadata leak alone (the 0.915 problem, still present) | 0.914                                                           |
-| Leak-adjusted                                          | **0.885**                                                       |
-| Internal comparison (RSNA, stratified)                 | 0.845 ± 0.015                                                   |
-
-The ranking transfers. What it does not license is a clean "better than internal" claim: the
-external task has no middle class (Kermany is normal against pneumonia only), which this
-project argues elsewhere is the easier and more biased framing, and prevalence differs
-threefold. The external number reads as "no collapse across a hard domain gap", not as an
-improvement.
-
-One check is worth more than the headline: the model score and the leak are largely
-complementary channels. Model alone 0.923, dimensions alone 0.914, both together 0.966. The
-model adds ~0.05 on top of the leak, and the leak ~0.04 on top of the model. If the model were
-simply re-reading the file dimensions, that first increment would not exist. Complementary is
-what is measured; strict independence is not, and additivity alone would not establish it.
-
-One error in this analysis changed the number and is recorded for that reason. The
-leak-stratified AUC was first weighted by stratum size. But one stratum held over a thousand
-positives against a single negative. Its whole AUC rested on comparisons with that one image,
-and size-weighting gave that noise full weight (≈0.85). Weighting instead by discordant pairs,
-which is the actual information content of a stratum, gives 0.885. A regression test now
-reconstructs the case. The corrected figure is the robust one: it moves by less than 0.002
-across every stratum definition tried, while the size-weighted variant swings by more than
-0.03.
-
-### 6. The calibration does not transfer, and clinically that is the decisive part
-
-Carrying the operating threshold (0.483) across, unchanged:
-
-|             |           |
-| ----------- | --------- |
-| Sensitivity | 0.649     |
-| Specificity | 0.950     |
-| PPV         | 0.972     |
-| NPV         | **0.500** |
+| | |
+| --- | --- |
+| sensitivity | 0.649 |
+| specificity | 0.950 |
+| PPV | 0.972 |
+| **NPV** | **0.500** |
 
 > Of the cases this model calls negative, half actually have pneumonia.
 
-The ranking transferred; the threshold did not. Prevalence went from 0.225 to 0.730 and the
-score distribution shifted with it (sensitivity fell from ~0.82 internally to 0.649, which
-prevalence alone cannot explain). This is the distinction that usually disappears between
-"AUC 0.92" and "ready to use", and it is why the demo application reports a probability with
-its uncertainty and never a binary label.
+The ranking transferred; the calibration did not. This is the distinction that
+usually disappears between "AUC 0.92" and "ready to use".
 
-The same problem exists within RSNA, between projections. In one fold, a single shared
-threshold gave sensitivity 0.894 in AP films and 0.677 in PA, one number behaving as two
-different tests. Prevalence differs fourfold between the two strata (0.383 against 0.093), the
-score distributions differ with it, so one shared cut-off sits in a different place in each.
+Per-image output: [`archiv/00_erste_laeufe_und_nebenanalysen`](archiv/00_erste_laeufe_und_nebenanalysen/).
 
-Setting the threshold per projection (on a separate selection split, never on the reporting
-set) narrows the sensitivity gap from 0.299 ± 0.073 to 0.067 ± 0.038. Those are means over the
-four folds that carry per-projection thresholds; fold 0 predates the change.
+---
+
+## What was tried and did not work
+
+Nine interventions were run under pre-registration: a primary endpoint, a bar, a
+guard on the endpoint that must not move, and a grey zone saying what would make
+the measurement too imprecise to judge, each written in a dated document before
+the run. **Four failed at their own bar.** They are reported as failures, with
+their raw predictions kept, and each has its own folder.
+
+| What was tried | Result | Details |
+| --- | --- | --- |
+| Pixel-exact lung masking | Refuted before training. The mediastinum becomes a hole whose shape is the cardiac silhouette, keeping ~90% of the projection signal and deleting 12.9% of the annotated boxes. | [00](archiv/00_erste_laeufe_und_nebenanalysen/) |
+| Per-image intensity normalisation | Refuted. Makes the channel stronger, 0.721 to 0.768, and CLAHE worse still at 0.818. | [00](archiv/00_erste_laeufe_und_nebenanalysen/) |
+| Adaptive lung crop | Refuted. The confounder rose in all five folds, because window size is itself a projection proxy. | [07](archiv/07_zuschnitt/) |
+| Stronger geometric augmentation | Failed. -0.0052 [-0.0286, +0.0181]. Diagnosis: only 24% of the size hint removed. | [06](archiv/06_augmentierung/) |
+| Fixed-size crop | Failed. +0.0099 [-0.0147, +0.0345], the point estimate moved the wrong way. | [07](archiv/07_zuschnitt/) |
+| 512 pixels instead of 224 | Failed at both bars, and both registered effects fell **outside** the intervals. The confounder moved house: grey value at 224, fine texture at 512. | [08](archiv/08_aufloesung/) |
+| Strong photometric jitter | Failed. -0.0054 [-0.0384, +0.0276], with the lever demonstrated to work beforehand. | [09](archiv/09_photometrie/) |
+
+Four interventions at the image, four null results at the confounder. The one
+thing that did move it addresses the training stream rather than the pixels, and
+it is in the shipped model at a stated price:
+
+| | change against baseline | t |
+| --- | --- | --- |
+| score to projection (primary, should fall) | **-0.0554 ± 0.0123** | -10.05 |
+| stratified AUC (secondary, must not fall) | -0.0181 ± 0.0058 | -7.03 |
+
+Ten times the size of anything the image interventions produced, and **a failed
+pre-registration**: the stratified AUC was not allowed to fall and it fell, by
+more than the tolerance set in advance. It also costs localisation quality (point
+AUC 0.660 against 0.704). The honest summary is bought, not won, and the trade
+has a number on both sides. Details in
+[`archiv/04_umgewichtung`](archiv/04_umgewichtung/).
+
+One methodological result changes what a further attempt would cost. Pairing
+shrinks the interval on the diagnosis endpoint to a third in all four arms and
+never on the confounder endpoint, because the latter is training noise rather
+than a property of the fold. **More folds do not sharpen it, more seeds do:**
+three seeds per fold, about fourteen hours, would roughly halve the interval.
+That is the entry price for the next question of this kind, and it means an
+effect of 0.03 could have been missed in three of the four arms.
+
+The full index of experiments, with per-image predictions for each, is in
+[`archiv/README.md`](archiv/README.md).
 
 ---
 
 ## Method rules
 
-- Splits are patient-grouped. No patient appears in both training and validation, and this
-  was checked rather than assumed.
-- The holdout is still sealed. 3,812 images, untouched, to be evaluated exactly once at the
-  end. Using it for an intermediate check would quietly burn the only unbiased estimate in
-  the project.
-- Selection and reporting use separate sets. The checkpoint is chosen on an inner
-  patient-grouped selection split; the outer validation fold is only reported. Thresholds come
-  from the selection split. Optimistic "oracle" variants run alongside so the gap stays
-  visible.
-- Comparisons are paired within a fold, because fold difficulty varies more than the effects
-  being measured. An unpaired difference of 0.005 means nothing.
-- Every number sits next to its null hypothesis: header-only baseline, chance box coverage,
-  leak-only AUC. Where no null could be constructed, that is stated.
-- Endpoints are written down before the run. Each intervention carries its primary endpoint,
-  its expected effect size and its "this would refute the idea" case in the source file, dated
-  before the first result existed. The crop in finding 4 is what that rule is for: the
-  endpoint moved the wrong way, and the pre-registration is what makes that readable as a
-  result rather than as a failed run.
-- Predictions are saved. Every run writes per-image scores, so re-analysis costs seconds
-  instead of another nine-hour run. That is what the first re-analysis on the earlier dataset
-  actually cost, before this rule existed.
-
----
-
-## Current experiment: reweighting instead of removing
-
-Since no deterministic transform removes the projection channel, the current experiment
-addresses the incentive instead of the evidence. The model reads the projection not because it
-is visible but because it is useful: `ViewPosition` → label has AUC 0.706, so a model trained
-on label accuracy has every reason to encode it. The evidence itself is spread over heart
-size, scapulae, diaphragm position, framing and sharpness at once, which is why removing any
-single carrier changed nothing.
-
-The imbalance sits in the cross-tabulation of the development set:
-
-|     | label 0 | label 1 | prevalence |
-| --- | ------- | ------- | ---------- |
-| AP  | 6,436   | 3,998   | 0.383      |
-| PA  | 11,282  | 1,156   | 0.093      |
-
-`--balance-view` draws each training image with the weight a chi-square test is built on, the
-count expected under independence divided by the count observed:
-
-    w(v, y) = n_v * n_y / (N * n_vy)
-
-That is 1.26 for AP-negative, 0.59 for AP-positive, 0.85 for PA-negative and 2.42 for
-PA-positive. Both marginals stay exactly as they were, the overall prevalence of 0.225 and the
-AP to PA ratio; only the association between them is cut. That is deliberate, because it
-leaves `pos_weight` valid and the class imbalance is not corrected twice. The weights come
-from the fitting split of the current fold alone; selection and reporting splits are never
-reweighted. The price at full dose is 14% of the effective sample size by the Kish measure,
-19,698 of 22,872.
-
-Pre-registered before the first run: the primary endpoint AUC(model score → `ViewPosition`)
-must fall from 0.8166 ± 0.0098; the stratified AUC must not fall from 0.8449 ± 0.0147; the raw
-AUC is expected to fall, and that is the success rather than a regression, because the 0.880
-contains the projection contribution.
-
-A dose-response curve on fold 0, with the weight raised to the power α, fixed the operating
-point:
-
-| α   | `ViewPosition` → label in the training stream | score → projection | stratified AUC | raw AUC | Grad-CAM peak | effective n |
-| --- | --------------------------------------------- | ------------------ | -------------- | ------- | ------------- | ----------- |
-| 0.0 | 0.706                                         | 0.8076             | 0.8209         | 0.8649  | 0.527         | 15,248      |
-| 0.5 | 0.611                                         | 0.7671             | 0.8194         | 0.8562  | 0.444         | 14,762      |
-| 1.0 | 0.500                                         | 0.7381             | 0.8111         | 0.8434  | 0.340         | 13,133      |
-
-The shape of that curve is the finding. At 46% of the dose, 58% of the effect arrives against
-44% of the cost. The benefit is concave and the harm convex, so the operating point lies in
-the middle rather than at the maximum: 0.490 endpoint gain per unit of Grad-CAM loss at
-α = 0.5, against 0.372 at α = 1.0. Split by projection over the same 300 images, the Grad-CAM
-peak runs 0.596 → 0.491 → 0.342 in AP films (4.7× → 3.8× → 2.7× chance) and 0.306 → 0.296 →
-0.333 in PA films (4.7× → 4.6× → 5.2×). The loss sits in AP, where the positives are weighted
-down; the gain in PA arrives only at full dose.
-
-Interim, and explicitly interim: two of the five folds are complete at α = 0.5.
-
-| difference against baseline  | fold 0  | fold 1  | mean of 2 folds |
-| ---------------------------- | ------- | ------- | --------------- |
-| score → projection (primary) | -0.0405 | -0.0354 | -0.0379         |
-| stratified AUC (secondary)   | -0.0015 | -0.0191 | -0.0103         |
-| raw AUC                      |         |         | -0.0132         |
-| Grad-CAM peak                | -0.083  | -0.072  | -0.0773         |
-
-The primary endpoint is moving in the pre-registered direction and is stable so far (spread
-0.0036 over two folds). The secondary condition is the one at risk: the pre-set tolerance for
-the stratified AUC is -0.015 and the current mean is -0.0103, carried by a single fold. Folds
-2 to 4 decide this point, not the primary endpoint. Two folds are also too few for an
-interval, so these numbers are a status report and not a result.
-
-One side finding replicates already: the per-projection sensitivity gap is 0.016 in fold 1 and
-0.005 in fold 0, against 0.072 in the corresponding baseline.
+- Splits are patient-grouped, and this was checked rather than assumed.
+- The holdout was opened once, after the model, the curves and the threshold were
+  fixed and written to a file. The prediction script locks itself afterwards,
+  because the usual way a holdout is spent is not dishonesty but convenience.
+- Selection and reporting use separate sets. The checkpoint, the calibration curve
+  and the threshold come from an inner patient-grouped selection split; the outer
+  fold is only reported.
+- Comparisons are paired within a fold, because fold difficulty varies more than
+  the effects being measured.
+- Every number sits next to its null hypothesis: header-only baseline, location
+  prior and lung map for the heat maps, leak-only AUC. One of those nulls, the
+  location prior, overturned this project's original headline.
+- Endpoints are written down before the run, and a bar is checked for whether it
+  can separate before the run. A bar the expected outcome clears no matter what
+  decides nothing; one of them had to be lowered in advance for that reason.
+- Predictions are saved. Every run writes per-image scores, so re-analysis costs
+  seconds instead of another nine-hour run.
 
 ---
 
 ## Repository
 
-The scripts are named in the order they run.
-
 ```
-Data and the null hypothesis
-  rsna_prepare.py             DICOM to PNG, once
-  rsna_splits.py              patient-grouped splits, stratified, holdout sealed off
-  rsna_data.py                DICOM header extraction
-  rsna_metadata_leak_check.py the header-only baseline, run before any training
+train_final_model.ps1   trains the deployed model, five folds, one recipe.
+                        Start here to reproduce anything below.
+commit.ps1              versions the repository in reviewable steps
 
-Training and evaluation
-  rsna_train.py               training, stratified metrics, Grad-CAM against boxes,
-                              perturbation battery, per-epoch history, --balance-view
-  rsna_gradcam_grid.py        heat maps for visual inspection, hits and misses separated
+rsna/pipeline/       the model's own path
+  rsna_prepare.py      DICOM to PNG, once
+  rsna_splits.py       patient-grouped splits, holdout sealed off
+  rsna_data.py         DICOM header extraction
+  rsna_train.py        the two-headed network, training, stratified metrics,
+                       Grad-CAM against boxes, perturbation battery
+  rsna_holdout.py      the one pass over the sealed set, locks itself afterwards
+  rsna_make_crops.py, rsna_make_masks.py, rsna_crop_masks.py
 
-Does segmentation help? (answer: no, and it hurts)
-  rsna_make_masks.py          U-Net lung masks, resumable, raw output cached
-  rsna_cam_lung_check.py      does the heat-map peak fall outside the lung?
-  rsna_mask_sweep.py          is the apparent headroom just a mask artefact?
-  rsna_mask_silhouette.py     what pixel-exact masking would really do
+rsna/befunde/        the analyses, including those for the archived experiments
+  rsna_metadata_leak_check.py  the header-only baseline, run before any training
+  rsna_lokalisation.py         location prior and lung map: the null for the heat maps
+  rsna_cam_power.py            every map against every null, on every positive image
+  rsna_platt.py                the five calibration curves and the threshold
+  rsna_phase10_auswertung.py   the verdict, pre-registration wired in as constants
+  rsna_external_kermany.py     leak stratification, grouped bootstrap, threshold transfer
+  ...                          one per archived experiment
 
-The rectangular crop (answer: it re-encodes the confounder)
-  rsna_crop_geometry.py       can a crop reduce the projection confounder at all?
-  rsna_make_crops.py          precomputed crop, bounding boxes rewritten to match
-  rsna_crop_compare.py        paired comparison, endpoints fixed in the module header
-  rsna_crop_qc.py             visual check of the crop windows
-
-External validation
-  rsna_external_kermany.py    leak stratification, grouped bootstrap, threshold transfer
-  splits.py                   patient grouping for that dataset
-
-tests/                        six suites, run against hand-computed cases
-archiv/kermany/               the first phase, closed but kept: it is the evidence
-webapp/                       demo interface
-```
-
-Every script's module docstring says what it produces, why it exists, and how to read its
-result, including which value is the null and what would falsify the claim.
-
-```bash
-# reproduce the headline
-python rsna/befunde/rsna_metadata_leak_check.py          # the null hypothesis, first
-python rsna/pipeline/rsna_splits.py
-python rsna/pipeline/rsna_prepare.py
-for f in 0 1 2 3 4; do python rsna/pipeline/rsna_train.py --fold $f --device directml; done
-python rsna/befunde/rsna_external_kermany.py
+serving/             FastAPI backend, serves the five-model ensemble
+  model/               the network definition and kalibrierung_p10.json, which
+                       names the five weights, the five curves and the threshold
+  segmentation/        the U-Net lung finder. It sits here rather than at the
+                       root because the application is its only consumer: it is
+                       shown on its own card and never touches the score
+webapp/              the interface
+checkpoints/         weights; only the five of the ensemble and the U-Net are versioned
+tests/               run against hand-computed cases; each states which silent
+                     failure it prevents
+archiv/              every experiment that did not end up in the model
+predictions_final_model/   the five folds the shipped model is built from
+predictions_holdout/       the one pass over the sealed set
+results_rsna.csv           one row per training run, every configuration column
+qc/rsna/                   the DICOM headers, which are both the input to the
+                           split and the evidence for the header-only baseline
 ```
 
----
+Every script's module docstring says what it produces, why it exists, and how to
+read its result, including which value is the null and what would falsify the
+claim.
 
-## Hardware, and why it appears in the README
+```powershell
+# reproduce the headline, in this order
+venv\Scripts\python.exe rsna\befunde\rsna_metadata_leak_check.py  # the null hypothesis, first
+venv\Scripts\python.exe rsna\pipeline\rsna_prepare.py             # DICOM to PNG
+venv\Scripts\python.exe rsna\pipeline\rsna_splits.py              # folds, and the seal
 
-A Radeon RX 5500 XT. RDNA1, so no CUDA and no ROCm, which leaves `torch-directml` over
-DirectX 12 as the route. No mixed precision, batch size 16, DataLoader workers disabled on
-Windows.
+.\train_final_model.ps1 -Rauchtest    # one fold, three epochs, half an hour
+.\train_final_model.ps1               # five folds, about three and a half hours
 
-It appears here because it shaped the design. Every hour of compute had to be justified before
-it was spent, which is why this project measures whether an idea can work before training on
-it. The segmentation question was settled by three cheap measurements instead of an 11.5-hour
-run. Having to argue for each run produced better planning than an unlimited budget would
-have.
+venv\Scripts\python.exe rsna\befunde\rsna_platt.py           # curves and threshold,
+                                                             # development data only
+venv\Scripts\python.exe tests\test_rsna_phase10.py           # the guard, must be green
+venv\Scripts\python.exe rsna\pipeline\rsna_holdout.py --dml-index 1   # once, and only once
+venv\Scripts\python.exe rsna\befunde\rsna_phase10_auswertung.py
+```
+
+The order is binding rather than conventional. Curves and threshold have to be
+written to disk before the holdout is computed; doing it the other way round
+means the holdout picked the curve, and the number stops meaning what it says.
+`rsna_holdout.py` locks itself after the first pass, so in this repository it
+will refuse to run.
+
+### Hardware, and why it appears in a README
+
+A Radeon RX 5500 XT. RDNA1, so no CUDA and no ROCm, which leaves `torch-directml`
+over DirectX 12. No mixed precision, batch size 16, DataLoader workers disabled
+on Windows.
+
+It appears here because it shaped the design. Every hour of compute had to be
+justified before it was spent, which is why this project measures whether an idea
+can work before training on it. The segmentation question was settled by three
+cheap measurements instead of an 11.5-hour run, and a pre-set grey zone released
+a fourteen-hour follow-up run three times without spending it.
 
 ---
 
 ## Limitations
 
-- Single architecture (ResNet-18, ImageNet-initialised). No architecture search, which would
-  not have answered any question this project asks.
-- The holdout is still sealed, so the final unbiased number does not exist yet.
-- External validation is a single dataset, and a paediatric one. It is a hard domain gap, not
-  a representative one.
-- The Grad-CAM mass ratio of 1.6× is weak. The map localises with its peak and is diffuse
-  elsewhere, and that has not been fixed.
-- The reweighting experiment costs localisation quality: the Grad-CAM peak falls from 0.527 to
-  0.444 at the chosen operating point. Whether that trade is acceptable is not settled by the
-  numbers alone.
-- Radiologist-drawn boxes are the reference standard, not microbiology or follow-up. The model
-  is measured against reader opinion, with all that implies.
-- Everything here is the work of one person learning. Errors should be assumed to remain; the
-  tests and the saved predictions exist so that they can be found.
+- Single architecture. No architecture search, which would not have answered any
+  question this project asks.
+- The holdout is spent. It was opened once, which is the correct number, and any
+  further change to the model has no unbiased set left to be measured on.
+- The ensemble has no clean calibration set. Each member is calibrated on data it
+  never saw, and the average of calibrated probabilities is then approximately
+  calibrated, but that last step was verified on the holdout rather than
+  guaranteed by construction.
+- The projection confounder is shipped. The score predicts AP against PA at
+  0.750, four pre-registered image interventions did not lower it, and the one
+  that did is a measured trade rather than a fix. A station with a different AP
+  to PA mix should expect a different operating point than the one measured here.
+- The single threshold behaves as two different tests, and per-projection
+  thresholds cannot be deployed because the application never sees the
+  projection.
+- External validation is a single dataset, and a paediatric one. It is a hard
+  domain gap, not a representative one, and no external set was evaluated for the
+  final ensemble at all.
+- The localisation head is uncalibrated and fires on 62 percent of films without
+  pneumonia, so it is shown as a hint about the region and never as a finding.
+- The confounder endpoint was measured too coarsely to exclude small effects.
+- The localisation findings rest on RSNA boxes only. A box is a reader's rectangle
+  around a region, not a segmentation of the pathology, and the measure treats
+  every pixel in it as equally diseased.
+- Radiologist-drawn boxes are the reference standard, not microbiology or
+  follow-up. The model is measured against reader opinion, with all that implies.
+- Everything here is the work of one person learning. Errors should be assumed to
+  remain; the tests and the saved predictions exist so that they can be found.
