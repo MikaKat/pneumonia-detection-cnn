@@ -9,9 +9,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# PyTorch als CPU-Wheels installieren (viel kleiner als die GPU-Variante)
-RUN pip install --no-cache-dir torch==2.3.* torchvision==0.18.* \
-    --index-url https://download.pytorch.org/whl/cpu
+# ZUERST pip aktualisieren, sonst scheitert die naechste Zeile.
+# Das pip aus python:3.10-slim vergleicht den Name:-Eintrag aus den Metadaten
+# buchstaeblich statt normalisiert. Es verwirft deshalb Wheels, die sich
+# "typing_extensions" statt "typing-extensions" nennen (dasselbe bei "Jinja2"
+# gegen "jinja2"), faellt auf das Quellarchiv zurueck, will dafuer flit_core
+# bauen - und findet flit_core auf dem PyTorch-Index nicht, weil --index-url
+# PyPI ersetzt und nicht ergaenzt.
+# Genau daran ist der Build am 13.08.2026 gescheitert, ohne dass sich im Repo
+# eine Zeile geaendert haette: typing_extensions 4.15.0 kam draussen neu dazu.
+RUN pip install --no-cache-dir --upgrade "pip>=25.2"
+
+# PyTorch als CPU-Wheels installieren (viel kleiner als die GPU-Variante).
+# Exakt gepinnt statt 2.3.* / 0.18.*: sonst haengt der Build davon ab, was der
+# Index am Tag des Deployments gerade anbietet - das ist die zweite Haelfte
+# desselben Fehlers.
+# Der zweite Index ist die Rueckfallebene fuer Bau-Hilfspakete wie flit_core.
+# Er ist ungefaehrlich, weil das Suffix +cpu auf PyPI nicht existiert: torch
+# selbst kann von dort nicht kommen, die 2-GB-GPU-Variante also auch nicht.
+RUN pip install --no-cache-dir \
+    torch==2.3.1+cpu torchvision==0.18.1+cpu \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple
 
 # Übrige Abhängigkeiten
 COPY requirements.txt .
