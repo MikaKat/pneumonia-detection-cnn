@@ -1,0 +1,89 @@
+==========================================================================
+0. WAS DA IST
+==========================================================================
+  Zeilen 67914, Bilder 15000, Radiologen 17
+
+=== Klassen ===
+  No finding                 31818   10606
+  Aortic enlargement          7162    3067
+  Cardiomegaly                5427    2300
+  Pleural thickening          4842    1981
+  Pulmonary fibrosis          4655    1617
+  Lung Opacity                2483    1322  <- Ziel
+  Other lesion                2203    1134
+  Pleural effusion            2476    1032
+  Nodule/Mass                 2580     826
+  Infiltration                1247     613  <- Ziel
+  Calcification                960     452
+  ILD                         1000     386
+  Consolidation                556     353  <- Ziel
+  Atelectasis                  279     186
+  Pneumothorax                 226      96
+
+==========================================================================
+1. DIE ZWEI LESARTEN DES ZIELS
+==========================================================================
+
+  A  negativ = alles ohne Verschattungsfamilie (MIT Mittelklasse)
+     n 15000, positiv 1588, Praevalenz 0.1059
+  B  negativ = nur 'No finding' von allen (OHNE Mittelklasse)
+     n 12194, positiv 1588, Praevalenz 0.1302, 2806 Bilder verworfen
+  K  positiv nur bei MINDESTENS ZWEI Radiologen (Einer-Meinungen raus)
+     n 14250, positiv 838, Praevalenz 0.0588, 750 Bilder verworfen
+
+  A entspricht RSNA: dort sind 44 % der Bilder auffaellig OHNE
+  Verschattung, und genau die muss das Modell als negativ erkennen.
+  B waere der leichtere Test und deshalb der unehrlichere.
+
+==========================================================================
+2. DER LECK-TEST  (Kermany zum Vergleich: 0,9150)
+==========================================================================
+
+  Lesart A:  kombiniert 0.7822
+     width    allein 0.5795
+     height   allein 0.6127
+     aspect   allein 0.4707
+     pixels   allein 0.6063
+
+  Lesart B:  kombiniert 0.8496
+     width    allein 0.5884
+     height   allein 0.6255
+     aspect   allein 0.4633
+     pixels   allein 0.6190
+
+  Lesart K:  kombiniert 0.7828
+     width    allein 0.5896
+     height   allein 0.6281
+     aspect   allein 0.4667
+     pixels   allein 0.6192
+
+==========================================================================
+3. DIE KAESTEN  (dafuer wurde dieser Datensatz gewaehlt)
+==========================================================================
+
+  Bilder mit Ziel-Kaesten   1588
+  Kaesten insgesamt         4286
+  Kaesten je Bild           Median 2, max 15
+  Radiologen je Bild        Median 2
+  Kastenflaeche am Bild     Median 0.0260, 5./95. Perzentil 0.0028 / 0.1167
+
+  Bilder, bei denen NUR EIN Radiologe das Ziel sah: 750 von 1588
+  -> die Uneinigkeit ist selbst eine Messgroesse und wird berichtet,
+     nicht durch Mehrheitsentscheid weggeraeumt.
+
+==========================================================================
+4. WAS DIESER DOWNLOAD NICHT HERGIBT
+==========================================================================
+
+  Keine Projektionsangabe in der CSV (ViewPosition, view, projection fehlen).
+  Die 512er-PNG tragen keine DICOM-Kopfzeilen. **C IST MIT DIESEM
+  DOWNLOAD NICHT MESSBAR** und faellt aus der Vorfestlegung heraus.
+  Wer C will, zieht ein paar hundert Original-DICOM einzeln nach.
+
+  Ausserdem: die PNG sind auf 512x512 QUADRAT gezogen, das
+  Seitenverhaeltnis steckt nur noch in der CSV. Die 'pad'-Variante
+  laesst sich daher nur ueber ein Zurueckziehen bauen, mit einem
+  zweiten Abtastschritt. Primaer bleibt 'stretch', das ist ohnehin
+  die ausgelieferte Kette.
+
+  -> vindr_vorpruefung.json

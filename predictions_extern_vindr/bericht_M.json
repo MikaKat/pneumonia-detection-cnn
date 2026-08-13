@@ -1,0 +1,202 @@
+{
+  "wann": "2026-08-13T15:34:33+00:00",
+  "vorfestlegung": "erklaerungen/39_extern_vindr_vorfestlegung.md",
+  "arm": "_p5head_ex",
+  "lesart": "M",
+  "rauchtest": false,
+  "n": 15000,
+  "positiv": 838,
+  "praevalenz": 0.05586666666666667,
+  "checkpoints": {
+    "rsna_f0_s0_p5head_ex.pth": "7a181b7c4d4645ab",
+    "rsna_f1_s0_p5head_ex.pth": "58f4e099bdc65f52",
+    "rsna_f2_s0_p5head_ex.pth": "e266c95e83b075b4",
+    "rsna_f3_s0_p5head_ex.pth": "72b2f70bc80fa6ee",
+    "rsna_f4_s0_p5head_ex.pth": "27aa78cfed95dfb3"
+  },
+  "schwelle": 0.20031082470732348,
+  "leck_vorher_gemessen": 0.7822,
+  "a": {
+    "auc_roh_gepoolt": 0.8755495141625762,
+    "lo": 0.8630958004579504,
+    "hi": 0.8876194866796907,
+    "auc_ohne_platt": 0.8729669703354198,
+    "leck_nachgerechnet": 0.7676981225431327,
+    "auc_leck_bereinigt": 0.8402463840142734,
+    "je_quintil": [
+      {
+        "q": 1,
+        "n": 2995,
+        "n_pos": 3,
+        "n_neg": 2992,
+        "paare": 8976,
+        "auc": 0.9254679144385026
+      },
+      {
+        "q": 2,
+        "n": 2807,
+        "n_pos": 69,
+        "n_neg": 2738,
+        "paare": 188922,
+        "auc": 0.8653941838430675
+      },
+      {
+        "q": 3,
+        "n": 3197,
+        "n_pos": 96,
+        "n_neg": 3101,
+        "paare": 297696,
+        "auc": 0.86224873696657
+      },
+      {
+        "q": 4,
+        "n": 2997,
+        "n_pos": 224,
+        "n_neg": 2773,
+        "paare": 621152,
+        "auc": 0.8580878754314564
+      },
+      {
+        "q": 5,
+        "n": 3004,
+        "n_pos": 446,
+        "n_neg": 2558,
+        "paare": 1140868,
+        "auc": 0.8199563840865025
+      }
+    ],
+    "tor": 0.7,
+    "bestanden": true
+  },
+  "praevalenzschaetzer": {
+    "wahr": 0.05586666666666667,
+    "pos_rate": 0.1594,
+    "bbse_roh": -0.20263680953776111,
+    "bbse": 0.0,
+    "em": 9.82153702984434e-13,
+    "annahme_gebrochen": true
+  },
+  "kopffeld": {
+    "spalte": "point_auc_lung",
+    "wert": 0.8024946144426942,
+    "lo": 0.7880570657424268,
+    "hi": 0.8161720095568225,
+    "n_bilder": 838,
+    "intern": 0.9123,
+    "lagepriore": 0.752,
+    "tor": 0.75,
+    "bestanden": true,
+    "je_radiologe": {
+      "R10": {
+        "n": 694,
+        "wert": 0.7979734574999915,
+        "lo": 0.7809110387678487,
+        "hi": 0.8137936733416133
+      },
+      "R8": {
+        "n": 592,
+        "wert": 0.8513461465811689,
+        "lo": 0.8360416925355294,
+        "hi": 0.8658002357248966
+      },
+      "R9": {
+        "n": 727,
+        "wert": 0.8048521169953156,
+        "lo": 0.7884871341639185,
+        "hi": 0.820656019693109
+      }
+    },
+    "nach_zustimmung": {
+      "2": {
+        "n": 822,
+        "wert": 0.7538834061854172
+      },
+      "3": {
+        "n": 1281,
+        "wert": 0.8492843254350616
+      }
+    }
+  },
+  "kalibrierung": {
+    "ece": 0.05973113137657444,
+    "brier": 0.044832921107015054,
+    "priorversatz": -1.592491539969969,
+    "ece_nach_prior": 0.025532586254800357,
+    "brier_nach_prior": 0.04528206358367063,
+    "zuverlaessigkeit": [
+      {
+        "von": 0.0,
+        "bis": 0.1,
+        "n": 9639,
+        "p_mittel": 0.04778186231851578,
+        "anteil_positiv": 0.011204481792717087
+      },
+      {
+        "von": 0.1,
+        "bis": 0.2,
+        "n": 2964,
+        "p_mittel": 0.14054617285728455,
+        "anteil_positiv": 0.044534412955465584
+      },
+      {
+        "von": 0.2,
+        "bis": 0.30000000000000004,
+        "n": 1119,
+        "p_mittel": 0.24365635216236115,
+        "anteil_positiv": 0.1161751563896336
+      },
+      {
+        "von": 0.30000000000000004,
+        "bis": 0.4,
+        "n": 581,
+        "p_mittel": 0.3437051475048065,
+        "anteil_positiv": 0.2099827882960413
+      },
+      {
+        "von": 0.4,
+        "bis": 0.5,
+        "n": 352,
+        "p_mittel": 0.444452166557312,
+        "anteil_positiv": 0.36363636363636365
+      },
+      {
+        "von": 0.5,
+        "bis": 0.6000000000000001,
+        "n": 195,
+        "p_mittel": 0.5476933121681213,
+        "anteil_positiv": 0.5435897435897435
+      },
+      {
+        "von": 0.6000000000000001,
+        "bis": 0.7000000000000001,
+        "n": 102,
+        "p_mittel": 0.6471015214920044,
+        "anteil_positiv": 0.7156862745098039
+      },
+      {
+        "von": 0.7000000000000001,
+        "bis": 0.8,
+        "n": 36,
+        "p_mittel": 0.7468324899673462,
+        "anteil_positiv": 0.7777777777777778
+      },
+      {
+        "von": 0.8,
+        "bis": 0.9,
+        "n": 12,
+        "p_mittel": 0.8235350251197815,
+        "anteil_positiv": 0.9166666666666666
+      }
+    ]
+  },
+  "arbeitspunkt": {
+    "sens": 0.7136038186157518,
+    "spez": 0.873393588476204,
+    "ppv": 0.25010455876202425,
+    "npv": 0.9809659766833214,
+    "pos_rate": 0.1594
+  },
+  "c_messbar": false,
+  "c_hinweis": "512er-PNG ohne DICOM-Kopfzeilen, keine ViewPosition. C bleibt auf RSNA gemessen, siehe erklaerungen/39_.",
+  "dauer_s": 201.9
+}

@@ -1,0 +1,18 @@
+{
+  "leak_A": 0.7823204632341728,
+  "leak_B": 0.849573764386966,
+  "leak_K": 0.7827939411647888,
+  "n_bilder": 15000,
+  "positiv_A": 1588,
+  "praevalenz_A": 0.10586666666666666,
+  "n_B": 12194,
+  "positiv_B": 1588,
+  "praevalenz_B": 0.13022798097424962,
+  "bilder_mit_kaesten": 1588,
+  "kaesten": 4286,
+  "n_K": 14250,
+  "positiv_K": 838,
+  "praevalenz_K": 0.05880701754385965,
+  "ids_datei": "qc\\vindr_positiv_ids.csv",
+  "c_messbar": false
+}

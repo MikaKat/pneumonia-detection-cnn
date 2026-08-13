@@ -1,12 +1,34 @@
 import { useState } from "react";
 
+import {
+  PRAEVALENZ_VORGABEN,
+  REFERENZ_PRAEVALENZ,
+  likelihoodRatio,
+  priorShift,
+} from "../prior";
+import "../prevalence.css";
+import { GEMESSEN, SENS_ZUSAGE, STUFE, TEXTE, T_HIGH, T_LOW, stufeVon } from "../stufen";
+
 // Renders the finished analysis.
 //
-// Deliberately NO verdict. The backend stopped sending a `prediction` field and
-// this view stopped drawing one: in this project's external validation the
-// operating threshold did not transfer, and half of the images the model called
-// negative did have pneumonia (NPV 0.500, README section 6). A green "no signs
-// of pneumonia" box would be the one statement the measurements contradict.
+// NO VERDICT WAS SHOWN UNTIL 13.08.2026, AND THE REASON HAS BEEN REFINED
+// RATHER THAN DROPPED.
+//
+// The original reasoning: in this project's external validation the operating
+// threshold did not transfer, and half of the images the model called negative
+// did have pneumonia (NPV 0.500). A green "no signs of pneumonia" box would be
+// the one statement the measurements contradict.
+//
+// That was right about the danger and wrong about the cause. The problem was
+// never the word, it was a word WITHOUT A NUMBER. "Unremarkable" on its own is
+// a promise nobody measured. "Unremarkable, and 4 to 18 pneumonias in 100 land
+// here, measured on three datasets" is not a promise at all, it is a finding.
+//
+// So the tier is shown, and it always carries its own price. The three
+// thresholds and every figure behind them live in `../stufen`, chosen on the
+// development data alone under the FDA's clinical-action-point logic rather
+// than by Youden. The tier is computed from the REFERENCE probability, so the
+// prevalence control below cannot move it.
 //
 // What is shown instead: the probability, where it sits on a scale whose
 // meaning is stated, the range it moves through when the framing is nudged by a
@@ -35,6 +57,26 @@ import { useState } from "react";
 //    the head is preselected. Grad-CAM stays reachable because it is the only
 //    map that comes from the number above.
 //
+// THE CHANGE OF 13.08.2026: THE ASSUMED PREVALENCE IS VISIBLE AND ADJUSTABLE.
+//
+// The external validation on Kermany put a number on the last unstated
+// assumption in this page. Every percentage shown here is conditional on a
+// population where 22.5 in 100 images have pneumonia, because that is what the
+// Platt curves were fitted on. On Kermany, where 73 in 100 do, the calibration
+// error went from 0.0094 to 0.4783 — and two thirds of that was the prior
+// alone, recoverable by adding one constant to the logits.
+//
+// So the page now (a) says which population the number assumes, (b) lets that
+// population be changed, and (c) shows next to it the one quantity that does
+// NOT depend on the population: the likelihood ratio. Move the control and the
+// percentage moves; the likelihood ratio does not. That is exactly the split
+// the external validation measured — the ordering travels, the probability
+// does not — and it is worth more on the screen than in a limitations section.
+//
+// The decision is untouched by all of this. The threshold is shifted by the
+// same constant as the score, so `score >= threshold` holds or fails exactly as
+// before, and sensitivity and specificity are preserved to the last bit.
+//
 // The numbers quoted in the honesty block are from the held-out set of 3812
 // images, read once: `predictions_holdout/holdout.csv`, evaluated by
 // `rsna/befunde/rsna_phase10_auswertung.py`. The development figures next to
@@ -42,6 +84,9 @@ import { useState } from "react";
 export function ResultView({ result, stages = [], originalUrl, onReset }) {
   const [opacity, setOpacity] = useState(0.6);
   const [showViews, setShowViews] = useState(false);
+  // Defaults to the reference, where the correction is the identity and the
+  // page reads exactly as it did before.
+  const [praevalenz, setPraevalenz] = useState(REFERENZ_PRAEVALENZ);
   // "head" or "cam". The head is preselected: it is the better pointer by a
   // wide margin, and preselection is the part of a switch that most users
   // never change.
@@ -50,17 +95,52 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
   const u = result.uncertainty;
   const ens = result.ensemble?.per_fold?.length ? result.ensemble : null;
   const base = result.probability ?? 0;
-  const median = u?.median ?? base;
-  const lo = u?.min ?? base;
-  const hi = u?.max ?? base;
+  // The reference scale: what the backend computed, calibrated at 0.2253.
+  // Everything the model actually knows lives here.
+  const medianRef = u?.median ?? base;
+  const loRef = u?.min ?? base;
+  const hiRef = u?.max ?? base;
   const spread = u?.spread ?? 0;
-  const threshold = result.threshold;
+  const thresholdRef = result.threshold;
   const reference = result.reference;
+
+  // The display scale: the same evidence, re-expressed for the chosen
+  // population. One additive constant in logit space, applied to the score AND
+  // to the threshold, so their relation is invariant.
+  const angepasst = Math.abs(praevalenz - REFERENZ_PRAEVALENZ) > 1e-12;
+  const shift = (x) => priorShift(x, REFERENZ_PRAEVALENZ, praevalenz);
+  const median = shift(medianRef);
+  const lo = shift(loRef);
+  const hi = shift(hiRef);
+  const threshold =
+    typeof thresholdRef === "number" ? shift(thresholdRef) : thresholdRef;
+
+  // Prevalence-free. Computed from the REFERENCE score on purpose: it is a
+  // property of the model, and it must not move when the control does.
+  const lr = likelihoodRatio(medianRef);
+  const lrText = lr >= 10 ? lr.toFixed(0) : lr.toFixed(2);
+  const gewaehlt =
+    PRAEVALENZ_VORGABEN.find((v) => Math.abs(v.wert - praevalenz) < 1e-12) ??
+    null;
+
+  // The tier comes from the REFERENCE probability on purpose. The two
+  // thresholds were fixed on the development data, on that scale; reading them
+  // against a prior-shifted number would compare against a moving ruler.
+  const stufe = stufeVon(medianRef);
+  const stufeText = TEXTE[stufe];
+  // Die zwei Schwellen wandern mit der Anzeige mit, damit die Marken weiter
+  // dort sitzen, wo die Stufe wechselt. Die STUFE selbst wird trotzdem auf der
+  // Referenzskala bestimmt, siehe oben: sonst haenge die Einordnung am Regler.
+  const tLow = shift(T_LOW);
+  const tHigh = shift(T_HIGH);
 
   const pct = (x) => Math.round(x * 100);
   // Where the score sits matters less than how far it travels. Ten points of
   // movement from a 2 % change in framing means the digits are not meaningful.
   const unstable = spread >= 0.1;
+  // The band straddling a threshold is worth saying out loud: it means the tier
+  // itself would flip if the image had been framed two percent differently.
+  const stufeWackelt = stufeVon(loRef) !== stufeVon(hiRef);
 
   const camSrc = result.heatmap_png_base64
     ? `data:image/png;base64,${result.heatmap_png_base64}`
@@ -94,6 +174,29 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
           <span className="score-value">{pct(median)}%</span>
         </div>
 
+        {/* THE TIER, AND ITS PRICE IN THE SAME BREATH.
+            The asterisk is not a disclaimer. There are already three of those
+            on this page and a fourth would add nothing. It is a measured
+            number, and it is what turns the word from a claim into a finding. */}
+        <div className={`tier tier--${stufeText.ton}`}>
+          <div className="tier-head">
+            <span className="tier-label">{stufeText.label}<sup>*</sup></span>
+            <span className="tier-sub">{stufeText.kurz}</span>
+          </div>
+          <p className="tier-star">
+            <span className="tier-star-mark">*</span>
+            {stufeText.stern()}
+          </p>
+          {stufeWackelt && (
+            <p className="tier-star tier-star--warn">
+              <span className="tier-star-mark">!</span>
+              Across the {u ? u.views.length : 0} framings of this image the tier
+              itself changes. The wording above is therefore not stable for this
+              upload, and the number above it is the more honest output.
+            </p>
+          )}
+        </div>
+
         {/* The band is the point of this display: a single tick would claim a
             precision the model does not have. The dashed line is the operating
             point, which is what makes the rest of the bar readable. */}
@@ -103,9 +206,18 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
             style={{ left: `${pct(lo)}%`, width: `${Math.max(pct(hi) - pct(lo), 1)}%` }}
           />
           <div className="score-mark" style={{ left: `${pct(median)}%` }} />
-          {typeof threshold === "number" && (
-            <div className="score-threshold" style={{ left: `${pct(threshold)}%` }} />
-          )}
+          {/* ZWEI Marken seit 13.08.2026, nicht mehr eine.
+              Der alte Youden-Punkt 0.2003 ist aus der Skala verschwunden. Er
+              war das Maximum von Sensitivitaet plus Spezifitaet, also eine
+              Antwort ohne Frage. An seiner Stelle stehen die beiden Schwellen,
+              die einen Zweck haben: ausschliessen und einschliessen. Drei
+              Striche waeren einer zu viel gewesen, und der ohne Begruendung
+              musste gehen. `result.threshold` kommt weiter vom Server und wird
+              hier bewusst nicht mehr gezeichnet. */}
+          <div className="score-threshold score-threshold--low"
+               style={{ left: `${pct(tLow)}%` }} />
+          <div className="score-threshold score-threshold--high"
+               style={{ left: `${pct(tHigh)}%` }} />
         </div>
         <div className="score-scale" aria-hidden="true">
           <span>0%</span>
@@ -113,25 +225,103 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
           <span>100%</span>
         </div>
 
-        {typeof threshold === "number" && (
-          <p className="score-anchor">
-            The dashed line sits at <strong>{pct(threshold)}%</strong>, this model's
-            operating point. It was fixed on 22872 development images before the
-            held-out set was ever touched.{" "}
-            {reference?.percentile != null && (
+        <p className="score-anchor">
+          The two dashed lines sit at <strong>{pct(tLow)}%</strong> and{" "}
+          <strong>{pct(tHigh)}%</strong>. They are not one operating point but two
+          purposes: the lower was set for 90% sensitivity to rule out, the upper for
+          95% specificity to rule in, both on 22 872 development images and on
+          nothing else.{" "}
+          {reference?.percentile != null && (
+            <>
+              This score is higher than{" "}
+              <strong>{reference.percentile}%</strong> of those{" "}
+              {reference.n.toLocaleString("en-US").replace(/,/g, " ")} images.{" "}
+            </>
+          )}
+          The probabilities are calibrated to a population where about 22 in 100
+          images show pneumonia, so they run low by design: on 3812 held-out images
+          the highest score ever produced was 89%, and only 9% of images scored
+          above 60%. <strong>The lines are marks on a scale</strong>, and what
+          standing on either side of them has cost is stated above, measured rather
+          than promised.
+        </p>
+
+        {/* THE PREVALENCE CONTROL.
+            A percentage is meaningless without the population it refers to, and
+            until now this page never named one. It does now, and it lets it be
+            changed, because the assumption is wrong nearly everywhere the app
+            would be used. */}
+        <div className="prevalence">
+          <label className="prevalence-head" htmlFor="prevalence-select">
+            <span className="prevalence-label">Population this number assumes</span>
+            <select
+              id="prevalence-select"
+              className="prevalence-select"
+              value={gewaehlt ? gewaehlt.id : "eigen"}
+              onChange={(e) => {
+                const v = PRAEVALENZ_VORGABEN.find((x) => x.id === e.target.value);
+                if (v) setPraevalenz(v.wert);
+              }}
+            >
+              {PRAEVALENZ_VORGABEN.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.label} &middot; {(v.wert * 100).toFixed(v.wert < 0.1 ? 0 : 1)}%
+                </option>
+              ))}
+              {!gewaehlt && <option value="eigen">custom</option>}
+            </select>
+          </label>
+
+          <input
+            className="prevalence-range"
+            type="range"
+            min="0.005"
+            max="0.80"
+            step="0.005"
+            value={praevalenz}
+            aria-label="Assumed prevalence of pneumonia in the population"
+            onChange={(e) => setPraevalenz(parseFloat(e.target.value))}
+          />
+
+          <p className="prevalence-note">
+            {angepasst ? (
               <>
-                This score is higher than{" "}
-                <strong>{reference.percentile}%</strong> of those{" "}
-                {reference.n.toLocaleString("en-US").replace(/,/g, " ")} images.{" "}
+                Re-expressed for a population where{" "}
+                <strong>{(praevalenz * 100).toFixed(1)} in 100</strong> images show
+                pneumonia. The evidence in the image has not changed — only one
+                constant was added to the logits, which moves the score and the
+                dashed line by the same amount.{" "}
+                <strong>The decision is identical either way.</strong>
+              </>
+            ) : (
+              <>
+                No correction applied: this is the population the model was
+                calibrated on. Change it and the percentage moves, because a
+                probability is always a statement about a population and never
+                about an image alone.
               </>
             )}
-            The probabilities are calibrated to a population where about 22 in 100
-            images show pneumonia, so they run low by design: on 3812 held-out images
-            the highest score ever produced was 89%, and only 9% of images scored
-            above 60%. <strong>The line is a mark on a scale, not a verdict</strong> —
-            see below for why none is shown.
+            {gewaehlt?.hinweis && <> {gewaehlt.hinweis}</>}
           </p>
-        )}
+
+          {/* The number that does NOT move. This is the point of the whole
+              block: it makes visible which half of the output is a property of
+              the model and which half is borrowed from the population. */}
+          <p className="prevalence-lr">
+            <span className="prevalence-lr-value">&times;{lrText}</span>
+            <span>
+              <strong>Likelihood ratio.</strong> This image multiplies the odds of
+              pneumonia by {lrText}, whatever the population.{" "}
+              <em>This number does not move when the control above does</em> — it
+              is a property of the model, not of the setting. On external data the
+              ranking transferred and the probability did not; this is the part
+              that transferred.
+              {lr < 1 && (
+                <> Below 1, so this image argues mildly <em>against</em> pneumonia.</>
+              )}
+            </span>
+          </p>
+        </div>
 
         <p className="score-range">
           {u ? (
@@ -275,10 +465,49 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
           note the reader leaves with. */}
       <div className="honesty">
         <p>
-          <strong>No verdict is shown, on purpose.</strong> This is a research
-          demonstrator, not a diagnostic tool, and it reports a probability rather than a
-          label.
+          <strong>The tier above always carries its own error rate, on purpose.</strong>{" "}
+          This is a research demonstrator and not a diagnostic tool. For a long time it
+          showed no tier at all, because a bare word like "unremarkable" is a promise
+          nobody measured. It is shown now because the promise has been measured, three
+          times, and the number travels with the word.
         </p>
+        <p>
+          <strong>Where the two thresholds come from.</strong> Not from Youden, which
+          maximises a statistic and answers no clinical question, but from a purpose:{" "}
+          <strong>{pct(T_LOW)}%</strong> was fixed for 90% sensitivity (ruling out) and{" "}
+          <strong>{pct(T_HIGH)}%</strong> for 95% specificity (ruling in), both on the
+          22 872 development images and on nothing else. {SENS_ZUSAGE.satz}
+        </p>
+        <table className="tier-table">
+          <caption>
+            The same two thresholds on every dataset this model has been measured on.
+            The tier is one thing; what it is worth depends on who sends the images.
+          </caption>
+          <thead>
+            <tr>
+              <th>Dataset</th><th>prevalence</th>
+              <th>unremarkable</th><th>unclear</th><th>suspicious</th>
+            </tr>
+          </thead>
+          <tbody>
+            {GEMESSEN.map((g) => (
+              <tr key={g.id} className={g.heimat ? "tier-table--home" : undefined}>
+                <td>
+                  {g.name}
+                  <span className="muted"> &middot; {g.was}</span>
+                </td>
+                <td>{pct(g.praevalenz)}%</td>
+                {[STUFE.UNAUFFAELLIG, STUFE.UNKLAR, STUFE.AUFFAELLIG].map((s) => (
+                  <td key={s}>
+                    {pct(g[s].anteil)}% of images
+                    <br />
+                    <strong>{pct(g[s].krank)}% had it</strong>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
         <p>
           A low score does not rule out pneumonia. When this project carried its decision
           threshold from one dataset to another,{" "}

@@ -1,0 +1,120 @@
+==========================================================================
+0. NACHWEIS  Rekonstruktion der Entwicklungsvorhersagen
+==========================================================================
+  n            ist 22872.000000   soll 22872.000000   ok
+  praevalenz   ist     0.225341   soll     0.225341   ok
+  mittel_kal   ist     0.225476   soll     0.225476   ok
+  ece_kal      ist     0.009392   soll     0.009392   ok
+  brier_kal    ist     0.119569   soll     0.119569   ok
+  sens         ist     0.846333   soll     0.846333   ok
+  spez         ist     0.724856   soll     0.724856   ok
+  -> die Quell-Konfusionsmatrix ist echt.
+
+==========================================================================
+1. SIMULATION  Entwicklungsdaten auf eine Wunsch-Praevalenz umgezogen
+==========================================================================
+   (Umziehen aendert p(y) und laesst p(x|y) unberuehrt -> Label Shift gilt)
+
+    Ziel       n      BBSE    Fehler        EM    Fehler
+  ------------------------------------------------------
+   0.050    6000    0.0572   +0.0072    0.0612   +0.0112
+   0.100    6000    0.1176   +0.0176    0.1151   +0.0151
+   0.225    6000    0.2174   -0.0076    0.2138   -0.0112
+   0.400    6000    0.3975   -0.0025    0.3971   -0.0029
+   0.600    6000    0.5816   -0.0184    0.5853   -0.0147
+   0.730    6000    0.7184   -0.0116    0.7244   -0.0056
+   0.850    6000    0.8302   -0.0198    0.8403   -0.0097
+
+  groesster Fehler   BBSE 0.0198   EM 0.0151
+  -> beide Verfahren treffen, wenn die Annahme gilt.
+
+==========================================================================
+1b. STICHPROBENUMFANG  wahre Praevalenz 0.3, 400 Wiederholungen
+==========================================================================
+
+       n              BBSE 95 %-Band                EM 95 %-Band
+  --------------------------------------------------------------
+      50  [0.079, 0.534]  +/-0.228     [0.093, 0.524]  +/-0.216
+     100  [0.166, 0.446]  +/-0.140     [0.164, 0.438]  +/-0.137
+     200  [0.184, 0.429]  +/-0.123     [0.205, 0.410]  +/-0.102
+     500  [0.229, 0.380]  +/-0.075     [0.231, 0.370]  +/-0.069
+    1000  [0.252, 0.353]  +/-0.051     [0.255, 0.345]  +/-0.045
+    2000  [0.263, 0.336]  +/-0.036     [0.266, 0.331]  +/-0.032
+
+==========================================================================
+2. KERMANY  echte fremde Daten, wahre Praevalenz bekannt
+==========================================================================
+
+  n                        5856
+  wahre Praevalenz         0.7297
+  als positiv eingestuft   0.5975
+
+  BBSE schaetzt            0.5644   (-0.1653)
+  EM   schaetzt            0.5117   (-0.2180)
+
+  BBSE 95 %-Band (Patienten-Bootstrap)  [0.5313, 0.5925]
+  EM   95 %-Band                        [0.4524, 0.5593]
+
+  --- was die Schaetzung an der Kalibrierung ausrichtet ---
+
+  Prior                          d(Logit)       ECE     Brier    Sens    Spez
+  --------------------------------------------------------------------------
+  keine Korrektur                 +0.0000    0.4783    0.3739  0.7896  0.9210
+  BBSE geschaetzt 0.564           +1.4937    0.2308    0.1517  0.9998  0.0651
+  EM geschaetzt 0.512             +1.2817    0.2552    0.1710  0.9986  0.1314
+  wahr 0.730 (unerreichbar)       +2.2278    0.1641    0.1264  1.0000  0.0057
+
+  Anmerkung: Sens und Spez aendern sich NUR, weil die Schwelle hier
+  auf der verschobenen Skala angewandt wird. Bleibt die Entscheidung
+  auf der Referenzskala, sind beide von der Korrektur unberuehrt.
+
+==========================================================================
+2b. RESTSTREIT  wo der Fehler nach der wahren Korrektur noch sitzt
+==========================================================================
+
+          Feld      n  p (korrigiert)   beobachtet      Rest
+  ------------------------------------------------------------
+  0.2-0.3        46          0.2627       0.0000   -0.2627
+  0.3-0.4       185          0.3636       0.0432   -0.3204
+  0.4-0.5       396          0.4544       0.1010   -0.3534
+  0.5-0.6       704          0.5537       0.2855   -0.2682
+  0.6-0.7      1031          0.6546       0.6411   -0.0135
+  0.7-0.8      1673          0.7527       0.9354   +0.1827
+  0.8-0.9      1475          0.8450       0.9905   +0.1455
+  0.9-1.0       337          0.9260       1.0000   +0.0740
+
+  Ein reiner Achsenfehler haette hier ein GLEICHES Vorzeichen ueberall.
+  Wechselt es, hat sich auch die Steigung bewegt -> Kovariatenverschiebung,
+  und die ist mit keinem Prior der Welt zu heilen.
+
+==========================================================================
+4. ALARM  wie man merkt, dass die Population gewechselt hat
+==========================================================================
+
+  mittleres Logit Entwicklung   -1.9593
+  mittleres Logit Kermany       -1.2302   Versatz +0.7291
+
+  Braucht KEINE Labels. Laeuft ueber die letzten n Anfragen mit und
+  schlaegt an, wenn der Versatz eine festgelegte Schranke reisst.
+  Kermany haette hier klar angeschlagen, ohne ein einziges Label.
+
+==========================================================================
+3. LIKELIHOOD-VERHAELTNIS  die praevalenzfreie Zahl
+==========================================================================
+   LR(s) = odds(p_ref) / odds(pi_ref).  Reine Modelleigenschaft,
+   ueberlebt jeden Praevalenzwechsel unveraendert.
+
+     angezeigte Zahl       LR   was sie bedeutet
+  --------------------------------------------------------------------
+              0.0792     0.30   Median der Bilder ohne Pneumonie
+              0.2003     0.86   ARBEITSPUNKT
+              0.3000     1.47   
+              0.4823     3.20   Median der echten Pneumonien
+              0.6000     5.16   90. Perzentil der Anzeige
+              0.8927    28.60   hoechster je gesehener Wert
+
+==========================================================================
+URTEIL
+==========================================================================
+  Simulation getroffen, Kermany um -0.165 (BBSE) bzw. -0.218 (EM) daneben.
+  Der Schaetzer ist in Ordnung, die Annahme bei Kermany nicht.

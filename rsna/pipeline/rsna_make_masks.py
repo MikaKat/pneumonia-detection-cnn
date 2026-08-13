@@ -333,11 +333,38 @@ def resolve_device(name: str):
     line a second call falls through every name comparison and silently returns
     the CPU. The run would still run, twenty times slower, and nobody would see
     an error.
+
+    FIXED 13.08.2026, and the fix is the thing this docstring warned about.
+    `pick_device` gained a THIRD return value in phase 4, the readable adapter
+    label that goes into the log and into `results_rsna.csv`. This caller was
+    not pulled along, so every call died with "too many values to unpack". The
+    docstring above says "no local copy, two versions drift apart" and was
+    right about the danger and wrong about the direction: the copy did not
+    drift, the callee grew and the caller stayed. A shared function is only
+    half a safeguard; the other half is that its callers are found when it
+    changes.
+
+    ADDED at the same time: an adapter index, as `directml:1`. Without it this
+    ran on the CPU while every other script in the project takes `--dml-index`,
+    and adapter 0 on this machine is the integrated chip, not the card. A mask
+    run of 15000 images is exactly where that difference is felt.
     """
     if not isinstance(name, str):
         return name
     from rsna_train import pick_device
-    dev, _ = pick_device(name)
+    index = 0
+    if ":" in name:
+        name, _, roh = name.partition(":")
+        if not roh.isdigit():
+            raise SystemExit(f"--device {name}:{roh}: nach dem Doppelpunkt "
+                             f"gehoert eine Adapternummer, etwa directml:1")
+        index = int(roh)
+    dev, _, label = pick_device(name, index)
+    # Einmal, nicht bei jedem Aufruf: resolve_device laeuft zweimal, und zwei
+    # gleiche Zeilen im Log lesen sich wie zwei Geraete.
+    if getattr(resolve_device, "_gemeldet", None) != label:
+        print(f"  Geraet: {label}")
+        resolve_device._gemeldet = label
     return dev
 
 
@@ -598,7 +625,10 @@ def main(argv=None) -> int:
                         "then cost nothing)")
     p.add_argument("--from-cache", type=Path, default=None,
                    help="re-refine masks from the raw cache, without the U-Net")
-    p.add_argument("--device", default="cpu")
+    p.add_argument("--device", default="cpu",
+                   help="cpu | cuda | directml | directml:N. Die Nummer waehlt "
+                        "den Adapter, wie --dml-index in den anderen Skripten; "
+                        "0 ist auf dieser Maschine die integrierte Grafik.")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--qc-only", action="store_true")

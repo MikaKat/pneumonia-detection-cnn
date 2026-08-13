@@ -420,6 +420,47 @@ the score each one reaches printed on the switch. The order follows the table
 above and it used to be the other way round: the map in the large frame was the
 one that loses to a fixed template.
 
+### Reading the two maps
+
+The tempting reading is that the head gives the rough region and Grad-CAM zooms
+in on what the decision arm looked at inside it. One map and its magnifying
+glass. That is wrong twice over, and both corrections are worth having.
+
+The resolution runs the other way. The head is 196 tiles, taken from `layer3`;
+Grad-CAM is 49 tiles, taken from `layer4` one block later. The head is four
+times finer. Both are stretched to 224 for display, so the smoothness of either
+picture is interpolation and not information.
+
+More importantly they answer different questions. The head answers where the
+pneumonia is, and it was trained on exactly that against the boxes. Grad-CAM
+answers which parts of the last block the score leaned on, and nothing was ever
+trained to answer it. One is a statement, the other is a reconstruction. The
+table above is the evidence that this is not a quibble: a merely blurrier
+version of the head would land near 0.91 and softer, not at 0.73, and above all
+it could not land below a fixed template that never looks at the image. It
+measures something else, and what it measures is that the score rests partly on
+things that are not the pathology.
+
+The head fires on healthy films for a reason that is visible in how it was
+trained. The deployed arm is called `exclude` because images without a box were
+excluded from its loss: it only ever learned where the opacity is given that
+there is one. It was never taught to stay quiet. The control arm `empty`, same
+architecture but trained on empty films as well, alarms on 19 percent of normal
+chests instead of 62. The architecture would have permitted silence, since the
+field is 196 independent per-tile logistic regressions with no normalisation
+across tiles and could read zero everywhere at once. The training set is the
+reason it does not, which is why the fix is calibration rather than a new
+model. Being louder did not make it worse: against `empty` on the middle class
+it sits at +0.0047 [-0.0049, +0.0142], which does not separate.
+
+It is not simply an opacity detector, and that was a pre-registered gate rather
+than an afterthought. Its alarm separates pneumonia from normal at 0.9691 and
+pneumonia from the middle class, meaning films with some other abnormality, at
+0.7673 [0.7466, 0.7879]. A pure shadow detector would sit at chance on the
+second. The distance between the two numbers is honest about the rest: it is
+considerably better at finding that something is there than at deciding the
+something is pneumonia.
+
 ### The threshold in practice, and why no label is shown
 
 At the pre-registered threshold of 0.2003:
@@ -450,23 +491,34 @@ on a scale. Neither is a label.
 
 ## External validation
 
-Five RSNA-trained checkpoints, pure inference, no fine-tuning, on 5,856 Kermany
-images from 3,054 patient groups. Every axis shifts at once: adults to children
-aged 1 to 5, USA to Guangzhou, 1024² DICOM to JPEG of varying size, prevalence
-0.225 to 0.730.
+The five deployed weights, each with its own calibration curve, probabilities
+averaged, threshold unchanged at 0.2003. Pure inference, no fine-tuning, on
+5,856 Kermany images from 3,054 patient groups. Every axis shifts at once:
+adults to children aged 1 to 5, USA to Guangzhou, 1024² DICOM to JPEG of
+varying size, prevalence 0.225 to 0.730.
+
+Endpoints, gates and expected values were fixed before the run and are wired
+into the script as constants: which preprocessing variant counts as primary,
+where the gate sits, and the prediction that the calibration would fail.
 
 | | AUC |
 | --- | --- |
-| raw ensemble | 0.923 [0.916, 0.930], bootstrap grouped by patient |
-| single folds | 0.886 ± 0.019 |
-| metadata leak alone | 0.914 |
-| **leak-adjusted** | **0.885** |
-| internal comparison (RSNA, stratified) | 0.845 ± 0.015 |
+| raw ensemble | 0.934 [0.928, 0.941], bootstrap grouped by patient |
+| single folds | 0.880 ± 0.026 |
+| metadata leak alone | 0.915 |
+| **leak-adjusted, the reported number** | **0.923** |
+| earlier run, single checkpoint, leak-adjusted | 0.885 |
+| internal comparison (RSNA holdout, stratified) | 0.869 |
 
-The ranking transfers. What that does not license is a clean "better than
-internal" claim: the external task has no middle class, which this project argues
-is the easier and more biased framing, and prevalence differs threefold. It reads
-as "no collapse across a hard domain gap", not as an improvement.
+The external number is pooled because Kermany carries no projection annotation,
+while every internal number in this repository is stratified by projection. The
+two are read side by side, not subtracted.
+
+The ensemble is worth more abroad than at home. It sits 0.054 above the mean of
+its five members here, against 0.021 on the internal holdout. Averaging
+calibrated probabilities rather than raw ones accounts for 0.006 of the external
+figure, so the calibration curves improve the ranking even though the
+probabilities they produce do not survive, see below.
 
 The leak is real and had to be corrected for. In the Kermany set the JPEG
 dimensions alone separate the classes at AUC 0.915; in the official test folder
@@ -475,31 +527,181 @@ about 2.4 times the pixel count of pneumonia films. That is why the project move
 to RSNA, where every image is 1024 by 1024 and the confounders are written in the
 DICOM header, so they can be measured instead of reconstructed.
 
-One check is worth more than the headline: model score and leak are largely
-complementary channels. Model alone 0.923, dimensions alone 0.914, both
-together 0.966. If the model were simply re-reading the file dimensions, that
-increment would not exist. Complementary is what is measured; strict independence
-is not.
+The model is measured inside the quintiles of that geometry score, weighted by
+discordant pairs rather than by count, because the top quintiles are almost pure:
+
+| quintile | n | positive | negative | discordant pairs | AUC |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1,171 | 255 | 916 | 233,580 | 0.935 |
+| 2 | 1,171 | 654 | 517 | 338,118 | 0.923 |
+| 3 | 1,171 | 1,042 | 129 | 134,418 | 0.916 |
+| 4 | 1,149 | 1,129 | 20 | 22,580 | 0.853 |
+| 5 | 1,194 | 1,193 | 1 | 1,193 | 0.817 |
+
+In the three well-populated quintiles the model stays between 0.916 and 0.935,
+so it is ordering the images where the file geometry has stopped telling them
+apart. Padding to a square instead of stretching moves the ensemble by 0.006,
+which was pre-registered as the control that separates a preprocessing fault
+from a domain gap.
+
+One check is worth more than the headline: model score and file geometry are
+largely complementary channels. Computed the same way, out of fold and grouped
+by patient, the dimensions alone reach 0.915, the model alone 0.934, and the two
+together 0.975. If the model were simply re-reading the file dimensions, that
+increment would not exist. Complementary is what is measured; strict
+independence is not.
 
 ### And the part that says do not deploy this
 
+The calibration does not transfer, and the size of the failure was predicted
+before the run rather than explained after it:
+
+| | external | internal |
+| --- | --- | --- |
+| calibration error (ECE) | 0.478 | 0.009 |
+| mean stated probability | 0.251 | actual prevalence 0.730 |
+
+At a stated 0.25 the actual positive rate is 0.93. The cause is structural: a
+Platt curve carries the prevalence it was fitted at, 0.225, as a constant.
+Shifting the log odds by the difference between the two known prevalences, with
+nothing fitted on the external set, lowers the error from 0.478 to 0.164. Two
+thirds of the miscalibration is prevalence alone; one third is not.
+
 Carrying the operating threshold across unchanged:
 
-| | |
-| --- | --- |
-| sensitivity | 0.649 |
-| specificity | 0.950 |
-| PPV | 0.972 |
-| **NPV** | **0.500** |
+| | external | internal, same threshold |
+| --- | --- | --- |
+| sensitivity | 0.790 | 0.846 |
+| specificity | 0.921 | 0.725 |
+| PPV | 0.964 | |
+| **NPV** | **0.619** | |
 
-> Of the cases this model calls negative, half actually have pneumonia.
+> Of the 2,357 films this model calls negative, 899 have pneumonia.
 
 The ranking transferred; the calibration did not. This is the distinction that
-usually disappears between "AUC 0.92" and "ready to use".
+usually disappears between "AUC 0.92" and "ready to use". The earlier
+single-checkpoint run reported an NPV of 0.500 at a different threshold, so the
+improvement cannot be attributed to the ensemble alone.
 
-Per-image output: [`archiv/00_erste_laeufe_und_nebenanalysen`](archiv/00_erste_laeufe_und_nebenanalysen/).
+What this run cannot answer: whether the projection confounder travels, since
+Kermany has no projection annotation, and anything about the localisation head,
+since it has no boxes. Both need an adult dataset with view position.
+
+Per-image output, and every number quoted above:
+`predictions_extern_kermany/extern_kermany_ens.csv` and `bericht.json`. The
+earlier single-checkpoint run is in
+[`archiv/00_erste_laeufe_und_nebenanalysen`](archiv/00_erste_laeufe_und_nebenanalysen/).
 
 ---
+
+## External validation, second dataset: VinDr-CXR
+
+Adults this time, and boxes. 15,000 chest radiographs from two Vietnamese
+hospitals, each read by three radiologists independently, with rectangles for 22
+findings. The opacity family (Lung Opacity, Consolidation, Infiltration) covers
+1,588 images and is the closest public match to what RSNA labels, which is
+literally an opacity consistent with pneumonia drawn as a box.
+
+Same five deployed weights, same preprocessing, no fine-tuning, 306 seconds.
+What this set cannot answer was fixed before the run and is repeated here so it
+is not mistaken for a silent pass: the 512 px release carries no DICOM headers,
+so there is no projection annotation, and C is not measured. It stays measured
+on RSNA alone.
+
+### The primary endpoint failed
+
+| | value | gate | |
+| --- | --- | --- | --- |
+| localisation head, point AUC in lung | 0.740 [0.727, 0.752] | 0.75 | failed |
+| A, leak-adjusted | 0.794 | 0.70 | passed |
+
+The gate was the position prior of phase 5: a fixed template computed once from
+training boxes, which never looks at the image, reaches 0.752. The head reached
+0.740 externally against 0.912 internally, so outside RSNA it does not beat a
+template that ignores the picture. That was the pre-registered refutation
+criterion and it triggered.
+
+A behaves as it did on Kermany. Raw pooled 0.837 against 0.837 internally, and
+0.794 after adjusting for a geometry leak of 0.782, measured from the original
+image dimensions before any pixel was read.
+
+### Where the localisation failure sits
+
+The head is not uniformly worse. It tracks how much the three readers agreed:
+
+| readers who saw the opacity | images | point AUC |
+| --- | --- | --- |
+| one of three | 750 | 0.669 |
+| two of three | 822 | 0.754 |
+| all three | 1,281 | 0.849 |
+
+Measured against one reader's boxes it reaches 0.839, against another's 0.755,
+a spread of 0.122 with no change to the model in between. Where all three
+agreed, the head clears the template comfortably. On single opinions it does
+not. Nearly half the positive labels in this set, 750 of 1,588, rest on one
+reader whom two colleagues contradicted.
+
+### The label rule was changed after the result, and that is said here
+
+VinDr provides three independent readers for its training split and prescribes
+no way to combine them; its own test split uses five readers with two senior
+adjudicators. The pre-registered run counted an image positive as soon as one
+reader drew a box, which is the shape of the file rather than a decision. After
+the result was known the rule was changed to a majority: two of three is a
+finding, one of three is not.
+
+That is outcome switching, and the reason it is defensible is not that the
+argument is good but that both numbers are reported:
+
+| label rule | n | positive | A leak-adjusted | head | reader spread |
+| --- | --- | --- | --- | --- | --- |
+| pre-registered, one reader suffices | 15,000 | 1,588 | 0.794 | 0.740, failed | 0.122 |
+| majority, two of three | 15,000 | 838 | 0.840 | 0.803, passed | 0.049 |
+
+The last column is the argument for the rule that does not depend on the result.
+Under a majority the disagreement between individual readers falls from 0.122 to
+0.049 and all three readers rise, which is what would happen if single opinions
+had been driving the disagreement. It measures the labelling, not the model.
+
+The failed gate stands. The majority rule is now pre-registered for the next
+external set, which nobody has seen yet, so that the comparison there is clean.
+
+A blinded re-read was run to settle whether the disputed cases are real: 30
+disputed images mixed with 15 consensus positives and 15 clean negatives, read
+without labels or model output. It did not settle it. The two control groups
+separated at p = 0.066, which is to say the read was not sharp enough to
+interpret, and the controls are what revealed that. One observation survives, and
+it was not pre-registered: on the disputed images the model score tracks the
+blinded reader at AUC 0.921, on images where the dataset label carries no
+information because it calls all of them positive.
+
+### Calibration held here, and that is not what was expected
+
+| | ECE | after shifting the prior |
+| --- | --- | --- |
+| internal | 0.009 | |
+| VinDr, one reader suffices | 0.024 | 0.050, worse |
+| VinDr, majority | 0.060 | 0.026, better |
+| Kermany | 0.478 | 0.164, better |
+
+The two VinDr rows are the same images and the same scores under two definitions
+of truth, and the prior correction moves in opposite directions between them.
+The deployed probabilities are calibrated to a world where one reader out of
+three suffices; require a majority and the model overpredicts, which is what the
+shift then repairs. How well a model is calibrated depends not only on the
+population but on who defines the label.
+
+Sensitivity at the deployed threshold still fell, from 0.846 internally to
+0.591. With a calibration error of 0.024 that is not a calibration failure: an
+image scoring 0.25 on this set really does carry about a 23 percent chance. It
+is a spectrum effect. VinDr's opacities are subtler than RSNA's, so fewer of
+them clear a fixed threshold, and sensitivity is a property of the case mix as
+much as of the model.
+
+This corrects an earlier reading of the same run, which reported an ECE of 0.158
+and concluded the opposite. The script called the metric with its arguments
+reversed. The wrong number is left in the write-up next to the right one.
+
 
 ## What was tried and did not work
 
@@ -592,7 +794,10 @@ rsna/befunde/        the analyses, including those for the archived experiments
   rsna_cam_power.py            every map against every null, on every positive image
   rsna_platt.py                the five calibration curves and the threshold
   rsna_phase10_auswertung.py   the verdict, pre-registration wired in as constants
-  rsna_external_kermany.py     leak stratification, grouped bootstrap, threshold transfer
+  rsna_extern_kermany_ens.py   the deployed ensemble on a foreign set, gates wired in
+  rsna_extern_kermany_bild.py  reliability and leak quintiles as one figure
+  rsna_lernkurve.py            the per-epoch curve of the five deployed models
+  rsna_external_kermany.py     the earlier single-checkpoint run
   ...                          one per archived experiment
 
 serving/             FastAPI backend, serves the five-model ensemble
@@ -631,6 +836,9 @@ venv\Scripts\python.exe rsna\befunde\rsna_platt.py           # curves and thresh
 venv\Scripts\python.exe tests\test_rsna_phase10.py           # the guard, must be green
 venv\Scripts\python.exe rsna\pipeline\rsna_holdout.py --dml-index 1   # once, and only once
 venv\Scripts\python.exe rsna\befunde\rsna_phase10_auswertung.py
+
+venv\Scripts\python.exe rsna\befunde\rsna_extern_kermany_ens.py --dml-index 1
+venv\Scripts\python.exe rsna\befunde\rsna_lernkurve.py
 ```
 
 The order is binding rather than conventional. Curves and threshold have to be
@@ -670,16 +878,47 @@ a fourteen-hour follow-up run three times without spending it.
 - The single threshold behaves as two different tests, and per-projection
   thresholds cannot be deployed because the application never sees the
   projection.
-- External validation is a single dataset, and a paediatric one. It is a hard
-  domain gap, not a representative one, and no external set was evaluated for the
-  final ensemble at all.
+- External validation is two datasets now, one paediatric and one adult, and
+  both are hard domain gaps rather than representative ones. The ranking holds on
+  both: 0.923 leak-adjusted on Kermany, 0.794 on VinDr under the pre-registered
+  label rule and 0.840 under a majority rule. The calibration behaves in opposite
+  ways, breaking on Kermany at ECE 0.478 and holding on VinDr at 0.024, so the
+  earlier sentence "the calibration does not transfer" was too general and is
+  replaced by this one. **Whether the projection confounder travels is still
+  unmeasured**, because the published VinDr images carry no projection
+  annotation. That remains the open question this project has not answered.
+- The localisation head does not survive the move. Externally it reaches 0.740
+  against a template that never looks at the image and reaches 0.752, where
+  internally it reached 0.912. Part of that is the reference standard: on images
+  where all three readers agreed it reaches 0.849, on single opinions 0.669, and
+  two individual readers differ from each other by 0.122. It is not possible to
+  say from these numbers how much is the model and how much is the label.
+- The label definition for the VinDr run was changed after the result was known,
+  from "one reader suffices" to a majority of readers. Both numbers are reported
+  side by side and the pre-registered gate stands as failed. The majority rule is
+  pre-registered for the next external set rather than applied backwards.
+- A blinded re-read of the disputed cases was attempted and did not settle them.
+  Its two control groups separated at p = 0.066, which means the read was not
+  sharp enough to interpret. This is recorded because the controls are what
+  revealed it; without them the same numbers would have looked like a result.
 - The localisation head is uncalibrated and fires on 62 percent of films without
   pneumonia, so it is shown as a hint about the region and never as a finding.
 - The confounder endpoint was measured too coarsely to exclude small effects.
+- The two outputs were never combined, although the measurement says they
+  should be. On the middle class, where 96.5 percent of the classifier's false
+  positives sit, the localisation alarm beats the classifier score by +0.0166
+  [+0.0078, +0.0254]. Phase 5b noted it and phase 10 did not act on it, and now
+  the holdout is spent, so any combination could only be reported as a
+  development result.
 - The localisation findings rest on RSNA boxes only. A box is a reader's rectangle
   around a region, not a segmentation of the pathology, and the measure treats
   every pixel in it as equally diseased.
 - Radiologist-drawn boxes are the reference standard, not microbiology or
   follow-up. The model is measured against reader opinion, with all that implies.
+- One reported number was wrong and was corrected after the fact. The external
+  calibration error on VinDr was published as 0.158 and is 0.024; the metric had
+  been called with its two arguments reversed, and the Brier score beside it was
+  right because it happens to be symmetric in them. The conclusion drawn from the
+  wrong number was reversed as well. Both versions are kept.
 - Everything here is the work of one person learning. Errors should be assumed to
   remain; the tests and the saved predictions exist so that they can be found.

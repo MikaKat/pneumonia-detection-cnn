@@ -1,0 +1,230 @@
+{
+  "wann": "2026-08-13T11:07:18+00:00",
+  "arm": "_p5head_ex",
+  "images": "data/chest_xray",
+  "split": "alle",
+  "n": 5856,
+  "gruppen": 3054,
+  "praevalenz": 0.7296789617486339,
+  "leak_auc": 0.9150323048290261,
+  "schwelle": 0.20031082470732348,
+  "checkpoints": {
+    "rsna_f0_s0_p5head_ex.pth": "7a181b7c4d4645ab",
+    "rsna_f1_s0_p5head_ex.pth": "58f4e099bdc65f52",
+    "rsna_f2_s0_p5head_ex.pth": "e266c95e83b075b4",
+    "rsna_f3_s0_p5head_ex.pth": "72b2f70bc80fa6ee",
+    "rsna_f4_s0_p5head_ex.pth": "27aa78cfed95dfb3"
+  },
+  "primaere_variante": "stretch",
+  "tor_auc": 0.8,
+  "erwartung": {
+    "auc_leak_bereinigt": "0,84 bis 0,90, unterhalb der alten 0,885",
+    "ece_kalibriert": "UEBER 0,20, die Kalibrierung traegt voraussichtlich NICHT",
+    "sens_bei_schwelle": "ueber 0,90",
+    "npv_bei_schwelle": "ueber 0,60, deutlich besser als die alten 0,500",
+    "spez_bei_schwelle": "unter 0,60",
+    "pad_minus_stretch": "zwischen -0,01 und +0,01, wie im Einzelmodell"
+  },
+  "varianten": {
+    "stretch": {
+      "auc": 0.9340138219695899,
+      "auc_lo": 0.927526326326902,
+      "auc_hi": 0.940872744863938,
+      "auc_leak_bereinigt": 0.9230636439239391,
+      "auc_je_fold": [
+        0.8782774030001363,
+        0.8936620206591832,
+        0.9164831873408061,
+        0.8529902978330344,
+        0.8583844643510006
+      ],
+      "auc_roh_ensemble": 0.9280532879253726,
+      "je_quintil": [
+        {
+          "q": 1,
+          "n": 1171,
+          "n_pos": 255,
+          "n_neg": 916,
+          "disk_paare": 233580,
+          "auc": 0.9344592858977652
+        },
+        {
+          "q": 2,
+          "n": 1171,
+          "n_pos": 654,
+          "n_neg": 517,
+          "disk_paare": 338118,
+          "auc": 0.9230623628437409
+        },
+        {
+          "q": 3,
+          "n": 1171,
+          "n_pos": 1042,
+          "n_neg": 129,
+          "disk_paare": 134418,
+          "auc": 0.9159264384234254
+        },
+        {
+          "q": 4,
+          "n": 1149,
+          "n_pos": 1129,
+          "n_neg": 20,
+          "disk_paare": 22580,
+          "auc": 0.8532772364924712
+        },
+        {
+          "q": 5,
+          "n": 1194,
+          "n_pos": 1193,
+          "n_neg": 1,
+          "disk_paare": 1193,
+          "auc": 0.8172673931265717
+        }
+      ]
+    },
+    "pad": {
+      "auc": 0.9404632564077811,
+      "auc_lo": 0.9341832954679188,
+      "auc_hi": 0.9465292838734787,
+      "auc_leak_bereinigt": 0.9214798414553446,
+      "auc_je_fold": [
+        0.8778483770118354,
+        0.9163366059254372,
+        0.9003039402237589,
+        0.9112485380665949,
+        0.8563363161628814
+      ],
+      "auc_roh_ensemble": 0.9382045868525564,
+      "je_quintil": [
+        {
+          "q": 1,
+          "n": 1171,
+          "n_pos": 255,
+          "n_neg": 916,
+          "disk_paare": 233580,
+          "auc": 0.9293989211405086
+        },
+        {
+          "q": 2,
+          "n": 1171,
+          "n_pos": 654,
+          "n_neg": 517,
+          "disk_paare": 338118,
+          "auc": 0.9226808392336403
+        },
+        {
+          "q": 3,
+          "n": 1171,
+          "n_pos": 1042,
+          "n_neg": 129,
+          "disk_paare": 134418,
+          "auc": 0.9199958338912942
+        },
+        {
+          "q": 4,
+          "n": 1149,
+          "n_pos": 1129,
+          "n_neg": 20,
+          "disk_paare": 22580,
+          "auc": 0.8350310008857397
+        },
+        {
+          "q": 5,
+          "n": 1194,
+          "n_pos": 1193,
+          "n_neg": 1,
+          "disk_paare": 1193,
+          "auc": 0.8340318524727578
+        }
+      ]
+    }
+  },
+  "pad_minus_stretch": 0.006449434438191126,
+  "ece": 0.4783409155471053,
+  "brier": 0.37391308869174655,
+  "zuverlaessigkeit": [
+    {
+      "von": 0.0,
+      "bis": 0.1,
+      "n": 672,
+      "p_mittel": 0.07292496936329045,
+      "anteil_positiv": 0.0818452380952381
+    },
+    {
+      "von": 0.1,
+      "bis": 0.2,
+      "n": 1679,
+      "p_mittel": 0.1500355414985239,
+      "anteil_positiv": 0.4991066110780226
+    },
+    {
+      "von": 0.2,
+      "bis": 0.30000000000000004,
+      "n": 1676,
+      "p_mittel": 0.24816106246146977,
+      "anteil_positiv": 0.9337708830548926
+    },
+    {
+      "von": 0.30000000000000004,
+      "bis": 0.4,
+      "n": 1019,
+      "p_mittel": 0.3437482682153109,
+      "anteil_positiv": 0.9872423945044161
+    },
+    {
+      "von": 0.4,
+      "bis": 0.5,
+      "n": 500,
+      "p_mittel": 0.4441219419350082,
+      "anteil_positiv": 0.998
+    },
+    {
+      "von": 0.5,
+      "bis": 0.6000000000000001,
+      "n": 212,
+      "p_mittel": 0.545503610587357,
+      "anteil_positiv": 1.0
+    },
+    {
+      "von": 0.6000000000000001,
+      "bis": 0.7000000000000001,
+      "n": 65,
+      "p_mittel": 0.6463199996430217,
+      "anteil_positiv": 1.0
+    },
+    {
+      "von": 0.7000000000000001,
+      "bis": 0.8,
+      "n": 27,
+      "p_mittel": 0.7355119435053575,
+      "anteil_positiv": 1.0
+    },
+    {
+      "von": 0.8,
+      "bis": 0.9,
+      "n": 6,
+      "p_mittel": 0.8575933512847812,
+      "anteil_positiv": 1.0
+    }
+  ],
+  "arbeitspunkt": {
+    "sens": 0.7896091738825182,
+    "spec": 0.9210360075805433,
+    "ppv": 0.9642755072877965,
+    "npv": 0.618582944420874,
+    "pos_rate": 0.5975068306010929
+  },
+  "kopf_mittel": {
+    "alle": 0.22036567330360413,
+    "positiv": 0.24866510927677155,
+    "negativ": 0.14397688210010529
+  },
+  "urteil": {
+    "primaer_wert": 0.9230636439239391,
+    "primaer_tor": 0.8,
+    "primaer_bestanden": true,
+    "grauzone": false,
+    "ece_bestanden": false
+  },
+  "dauer_s": 200.8
+}
