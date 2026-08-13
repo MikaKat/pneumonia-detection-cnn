@@ -1,22 +1,24 @@
 # Pneumonia detection on chest radiographs
 
-A convolutional network that scores frontal chest radiographs for pneumonic
-consolidation and, at the same time, says where. The deployed model is an
-ensemble of five calibrated networks. It reaches a stratified AUC of **0.869** on
-3,812 held-out images that were sealed on the first day and opened exactly once,
-at the end.
+A convolutional network that estimates the probability of pneumonic opacity on
+frontal chest radiographs and produces a separate localisation map. The deployed
+model is an ensemble of five calibrated networks. It reached a stratified AUC of
+**0.869** on 3,812 held-out images that were sealed at the start of the project
+and evaluated once, after all model decisions had been fixed.
 
-The project was built by a freshly graduated doctor entering the clinical work
-life, in order to learn how these systems behave rather than to ship a product.
+This is a hobby project built by a newly qualified physician to understand how
+neural networks are trained, evaluated and made to fail. Its primary aim was to
+learn from the development process, not to maximise sensitivity or specificity
+or to produce a clinical system.
 
 > Not a medical device. Research demonstrator. No diagnostic use.
 
-Contents. [Terms](#terms) · [How the model is built](#how-the-model-is-built)
-· [How it was trained](#how-it-was-trained) · [Where the data comes
-from](#where-the-data-comes-from) · [Results](#results) · [External
-validation](#external-validation) · [What was tried and did not
-work](#what-was-tried-and-did-not-work) · [Limitations](#limitations) ·
-[Repository](#repository)
+**Contents:** [Terms](#terms) · [Model architecture](#model-architecture) ·
+[Training](#training) · [Data sources](#data-sources) · [Internal
+results](#internal-results) · [External validation: Kermany](#external-validation-kermany-paediatric-dataset) ·
+[External validation: VinDr-CXR](#external-validation-vindr-cxr-adult-dataset) ·
+[Negative results](#ablation-experiments-and-negative-results) ·
+[Limitations](#limitations) · [Repository](#repository-structure)
 
 ---
 
@@ -54,9 +56,9 @@ the difference between the two is one of its findings.
 
 ---
 
-## How the model is built
+## Model architecture
 
-### The trunk: ResNet-18
+### ResNet-18 backbone
 
 The backbone is a ResNet-18, initialised from ImageNet weights.
 
@@ -88,14 +90,14 @@ texture and shape, learned on photographs. Radiographs are not photographs, but
 the early filters transfer well enough that this is worth far more than starting
 from noise on a dataset of this size.
 
-### Head one: the diagnosis
+### Classification head
 
 `layer4` is averaged over its 7 by 7 positions into a single 512-number vector
 and passed through one linear layer to one logit. One and not two: the task
 is binary, and a single logit with a sigmoid is the form that lets the class
 imbalance be corrected with `pos_weight` in the loss.
 
-### Head two: where
+### Localisation head
 
 The second output is a **14 by 14 field**, one number per tile, saying how likely
 that tile is to contain the opacity. It is a single 1 by 1 convolution on the
@@ -119,17 +121,17 @@ It is the smallest thing that could do the job, deliberately. Anything deeper
 would have made "does supervision help" and "does more capacity help" the same
 experiment.
 
-```
-                    ┌─ layer4 ─ avgpool ─ linear ──────────► 1 logit    (diagnosis)
-input ─ stem ─ layer1 ─ layer2 ─ layer3 ─┤
-                                          └─ 1x1 conv ──────► 14x14 field (location)
-```
-
 Both heads share everything up to `layer3`. That is not an implementation
 convenience: the localisation supervision reaches back into the shared trunk and
 measurably improves what the diagnosis path looks at, which is reported below.
 
-### What is actually deployed: five of them
+<p align="center">
+  <img src="readme-assets/01_model_architecture.png" width="720" alt="A chest radiograph passing through the ResNet-18 stem and layers 1 to 4, with real intermediate activations and separate localisation and classification heads">
+</p>
+
+<p align="center"><em>Figure 1. A positive PA radiograph passing through fold 0 of the deployed ensemble. The six feature maps with the greatest spatial variation are shown for each stage. Each map was contrast-adjusted independently, so colours are comparable only within a map. The localisation head branches after layer 3; the classification branch continues through layer 4 and Platt calibration. Image source: <a href="https://www.rsna.org/artificial-intelligence/ai-image-challenge/rsna-pneumonia-detection-challenge-2018">RSNA Pneumonia Detection Challenge</a>; the underlying radiograph originates from the NIH Chest X-ray Collection.</em></p>
+
+### Deployed ensemble
 
 The shipped model is an ensemble of the five fold models, each Platt-calibrated
 on its own held-out selection split, and the five probabilities are averaged.
@@ -143,9 +145,15 @@ Weights, curves and threshold live together in one file,
 because three numbers that only make sense together should not be three separate
 settings.
 
+<p align="center">
+  <img src="readme-assets/03_training_and_ensemble.png" width="900" alt="Transfer learning of five ResNet-18 fold models and inference in which every raw score is calibrated with its corresponding Platt curve before averaging">
+</p>
+
+<p align="center"><em>Figure 2. ResNet-18 starts from ImageNet weights, receives the classification and localisation heads, and is fine-tuned in five patient-grouped folds. During inference, each model's raw score is transformed by its own Platt curve before the five calibrated probabilities are averaged. Image source: <a href="https://www.rsna.org/artificial-intelligence/ai-image-challenge/rsna-pneumonia-detection-challenge-2018">RSNA Pneumonia Detection Challenge</a>; the underlying radiograph originates from the NIH Chest X-ray Collection.</em></p>
+
 ---
 
-## How it was trained
+## Training
 
 The whole recipe below is one script,
 [`train_final_model.ps1`](train_final_model.ps1), and it is the only training
@@ -182,16 +190,35 @@ twice draws twice and moves the two by different amounts, the box then sits wher
 the opacity is not, the head is supervised against noise, and nothing in the
 output says so: the loss falls, the run finishes, only the map stays diffuse.
 
-### The loss
+### Loss function
 
-Binary cross-entropy on the logit with `pos_weight` set to the
-negative-to-positive ratio of the fitting split, plus a second binary
-cross-entropy on the head field, weighted by a lambda **measured from the first
-training batch** rather than chosen, so that the two terms start at comparable
-magnitudes. Only films that carry a box contribute to the localisation term.
+The loss function is the training signal. It turns the difference between the
+model output and the reference label into a single penalty. Back-propagation
+calculates which weights contributed to that penalty, and the optimiser changes
+them in the direction that should reduce it on the next batch. Without a loss,
+the optimiser has no definition of a better or worse prediction.
+
+Both outputs use binary cross-entropy. For a target of 1, it penalises a low
+predicted probability; for a target of 0, it penalises a high one. Confidently
+wrong predictions receive a much larger penalty than uncertain ones. The
+classification loss uses `pos_weight`, set to the negative-to-positive ratio of
+the fitting split, so the less frequent positive examples are not overwhelmed by
+the negative class.
+
+A second binary cross-entropy is calculated over the 14 by 14 localisation
+field. Its weight, lambda, is **measured from the first training batch** rather
+than selected by hand, so classification and localisation start at comparable
+magnitudes. Only radiographs with an annotated box contribute to this second
+term.
 
 Optimiser AdamW, learning rate 3e-4, weight decay 1e-4, one-cycle schedule,
 8 epochs, batch size 16.
+
+<p align="center">
+  <img src="readme-assets/02_training_curve.png" width="800" alt="Selection-split AUC, classification loss and localisation loss across eight epochs for five fold models">
+</p>
+
+<p align="center"><em>Figure 3. Training histories for the five deployed fold models. Thin lines represent individual folds and thick lines their mean. Yellow points mark the retained checkpoints (epochs 5, 8, 6, 8 and 2 for folds 0–4). The upper panel is raw pooled AUC on the inner selection split, not stratified AUC and not a holdout result. Classification loss continues to fall on the training data while selection loss rises after the early epochs; localisation loss continues to fall throughout training.</em></p>
 
 ### Decoupling projection from diagnosis in the sampling stream
 
@@ -211,8 +238,8 @@ AP to PA ratio. Only the association between them is cut, from 0.706 to exactly
 twice. Weights come from the fitting split of the current fold alone.
 
 It works, and it is the only thing in this project that ever moved the
-confounder. It is also paid for: see [what did not
-work](#what-was-tried-and-did-not-work) for the price and the failed
+confounder. It is also paid for: see [the ablation experiments and negative
+results](#ablation-experiments-and-negative-results) for the price and the failed
 pre-registration behind it.
 
 ### Splitting
@@ -246,7 +273,7 @@ shortcut worth 0.095 AUC.
 
 ---
 
-## Where the data comes from
+## Data sources
 
 No training or evaluation data is shipped here. All three sets are public and
 have to be downloaded from the source, which is also where their licences and
@@ -310,7 +337,7 @@ spent nine phases building guards against.
 
 ---
 
-## Results
+## Internal results
 
 Everything below was measured once, on the sealed set, after the model, the
 curves and the threshold had been written to disk. The full run is in
@@ -331,7 +358,7 @@ cross-validated estimate, and it was checked in advance that both outcomes were
 reachable: at the expected precision the lower bound would have landed near 0.83
 if the model held and below 0.80 if it did not.
 
-### The number that matters more than the headline
+### Agreement between cross-validation and holdout performance
 
 Each of the five models against its own cross-validation figure:
 
@@ -353,7 +380,7 @@ same devices and the same labelling procedure. It answers whether the developmen
 process fitted itself to its own data, and the answer is no. It says nothing
 about a different hospital.
 
-### Against the null hypothesis
+### Comparison with a metadata-only baseline
 
 A classifier fed nothing but the DICOM header, no pixels at all, reaches 0.557 on
 the same stratified comparison, because sicker patients get portable AP films.
@@ -420,7 +447,13 @@ the score each one reaches printed on the switch. The order follows the table
 above and it used to be the other way round: the map in the large frame was the
 one that loses to a fixed template.
 
-### Reading the two maps
+### Interpretation of the two localisation maps
+
+<p align="center">
+  <img src="readme-assets/04_example_outputs.png" width="1000" alt="Three held-out RSNA radiographs shown as the original image, model input, localisation field and Grad-CAM map">
+</p>
+
+<p align="center"><em>Figure 4. Three previously unseen PA radiographs and outputs from the final ensemble. The rows show a normal radiograph, an abnormal radiograph without pneumonia, and a radiograph labelled pneumonia/lung opacity. For each class-projection combination, the displayed case was selected by a prespecified median-score rule. Probabilities are model estimates, not diagnoses. Image source: <a href="https://www.rsna.org/artificial-intelligence/ai-image-challenge/rsna-pneumonia-detection-challenge-2018">RSNA Pneumonia Detection Challenge</a>; the radiographs originate from the NIH Chest X-ray Collection.</em></p>
 
 The tempting reading is that the head gives the rough region and Grad-CAM zooms
 in on what the decision arm looked at inside it. One map and its magnifying
@@ -461,7 +494,7 @@ second. The distance between the two numbers is honest about the rest: it is
 considerably better at finding that something is there than at deciding the
 something is pneumonia.
 
-### The threshold in practice, and why no label is shown
+### Operating threshold and user-interface behaviour
 
 At the pre-registered threshold of 0.2003:
 
@@ -489,7 +522,7 @@ on a scale. Neither is a label.
 
 ---
 
-## External validation
+## External validation: Kermany paediatric dataset
 
 The five deployed weights, each with its own calibration curve, probabilities
 averaged, threshold unchanged at 0.2003. Pure inference, no fine-tuning, on
@@ -544,14 +577,20 @@ apart. Padding to a square instead of stretching moves the ensemble by 0.006,
 which was pre-registered as the control that separates a preprocessing fault
 from a domain gap.
 
-One check is worth more than the headline: model score and file geometry are
+One check is especially informative: model score and file geometry are
 largely complementary channels. Computed the same way, out of fold and grouped
 by patient, the dimensions alone reach 0.915, the model alone 0.934, and the two
 together 0.975. If the model were simply re-reading the file dimensions, that
 increment would not exist. Complementary is what is measured; strict
 independence is not.
 
-### And the part that says do not deploy this
+<p align="center">
+  <img src="readme-assets/05_external_validation_kermany.png" width="800" alt="Calibration and image-geometry-stratified AUC of the ensemble on the paediatric Kermany dataset">
+</p>
+
+<p align="center"><em>Figure 5. External validation on the paediatric Kermany dataset. Top: calibration of the unchanged ensemble, a post-hoc prevalence-only shift used as a control calculation, and ideal calibration. Bottom: AUC within five groups of similar technical risk, calculated solely from image dimensions; the dashed line marks the weighted mean of 0.923. Radiograph source: <a href="https://data.mendeley.com/datasets/rscbjbr9sj/2">Kermany et al., Mendeley Data</a>; see also the <a href="https://pubmed.ncbi.nlm.nih.gov/29474911/">accompanying publication</a>.</em></p>
+
+### Deployment implications
 
 The calibration does not transfer, and the size of the failure was predicted
 before the run rather than explained after it:
@@ -594,7 +633,7 @@ earlier single-checkpoint run is in
 
 ---
 
-## External validation, second dataset: VinDr-CXR
+## External validation: VinDr-CXR adult dataset
 
 Adults this time, and boxes. 15,000 chest radiographs from two Vietnamese
 hospitals, each read by three radiologists independently, with rectangles for 22
@@ -608,7 +647,7 @@ is not mistaken for a silent pass: the 512 px release carries no DICOM headers,
 so there is no projection annotation, and C is not measured. It stays measured
 on RSNA alone.
 
-### The primary endpoint failed
+### Prespecified primary endpoint
 
 | | value | gate | |
 | --- | --- | --- | --- |
@@ -625,7 +664,7 @@ A behaves as it did on Kermany. Raw pooled 0.837 against 0.837 internally, and
 0.794 after adjusting for a geometry leak of 0.782, measured from the original
 image dimensions before any pixel was read.
 
-### Where the localisation failure sits
+### Analysis of localisation performance
 
 The head is not uniformly worse. It tracks how much the three readers agreed:
 
@@ -641,30 +680,39 @@ agreed, the head clears the template comfortably. On single opinions it does
 not. Nearly half the positive labels in this set, 750 of 1,588, rest on one
 reader whom two colleagues contradicted.
 
-### The label rule was changed after the result, and that is said here
+### Post-hoc majority-label analysis
 
 VinDr provides three independent readers for its training split and prescribes
 no way to combine them; its own test split uses five readers with two senior
-adjudicators. The pre-registered run counted an image positive as soon as one
-reader drew a box, which is the shape of the file rather than a decision. After
-the result was known the rule was changed to a majority: two of three is a
-finding, one of three is not.
+adjudicators. The prespecified run counted an image as positive as soon as one
+reader drew a box. After considering this binary target structure—pneumonia
+versus no pneumonia—I added a clinically more plausible definition: at least two
+of the three readers must identify the finding. A single dissenting annotation
+therefore no longer makes the image positive automatically.
 
-That is outcome switching, and the reason it is defensible is not that the
-argument is good but that both numbers are reported:
+This decision was made after the first result was known. It is therefore a
+post-hoc analysis and does not replace the prespecified evaluation; both results
+are reported side by side:
 
 | label rule | n | positive | A leak-adjusted | head | reader spread |
 | --- | --- | --- | --- | --- | --- |
 | pre-registered, one reader suffices | 15,000 | 1,588 | 0.794 | 0.740, failed | 0.122 |
 | majority, two of three | 15,000 | 838 | 0.840 | 0.803, passed | 0.049 |
 
-The last column is the argument for the rule that does not depend on the result.
+The last column provides evidence about the label rule that does not depend on
+the model's point estimate.
 Under a majority the disagreement between individual readers falls from 0.122 to
 0.049 and all three readers rise, which is what would happen if single opinions
 had been driving the disagreement. It measures the labelling, not the model.
 
-The failed gate stands. The majority rule is now pre-registered for the next
-external set, which nobody has seen yet, so that the comparison there is clean.
+The failed prespecified gate still stands; the majority-rule analysis is reported
+as an additional result.
+
+<p align="center">
+  <img src="readme-assets/06_external_validation_vindr.png" width="800" alt="Calibration, classification AUC and localisation performance on VinDr-CXR under two reference-label definitions">
+</p>
+
+<p align="center"><em>Figure 6. External validation on VinDr-CXR. Top: calibration under the prespecified “one of three” label rule and the post-hoc majority rule. Middle: raw classification AUC and AUC after controlling for original image geometry. Bottom: localisation-head point AUC with 95% confidence intervals; dashed lines show the internal result and an image-independent position template. The majority rule was added after examining the binary target structure, but only after the first result. No VinDr radiographs are reproduced because of the dataset's licence terms. Data source: <a href="https://physionet.org/content/vindr-cxr/1.0.0/">VinDr-CXR on PhysioNet</a>; see also the <a href="https://pubmed.ncbi.nlm.nih.gov/35858929/">accompanying publication</a>.</em></p>
 
 A blinded re-read was run to settle whether the disputed cases are real: 30
 disputed images mixed with 15 consensus positives and 15 clean negatives, read
@@ -675,7 +723,7 @@ it was not pre-registered: on the disputed images the model score tracks the
 blinded reader at AUC 0.921, on images where the dataset label carries no
 information because it calls all of them positive.
 
-### Calibration held here, and that is not what was expected
+### Calibration
 
 | | ECE | after shifting the prior |
 | --- | --- | --- |
@@ -703,7 +751,7 @@ and concluded the opposite. The script called the metric with its arguments
 reversed. The wrong number is left in the write-up next to the right one.
 
 
-## What was tried and did not work
+## Ablation experiments and negative results
 
 Nine interventions were run under pre-registration: a primary endpoint, a bar, a
 guard on the endpoint that must not move, and a grey zone saying what would make
@@ -750,7 +798,7 @@ The full index of experiments, with per-image predictions for each, is in
 
 ---
 
-## Method rules
+## Reproducibility principles
 
 - Splits are patient-grouped, and this was checked rather than assumed.
 - The holdout was opened once, after the model, the curves and the threshold were
@@ -772,7 +820,7 @@ The full index of experiments, with per-image predictions for each, is in
 
 ---
 
-## Repository
+## Repository structure
 
 ```
 train_final_model.ps1   trains the deployed model, five folds, one recipe.
@@ -847,7 +895,7 @@ means the holdout picked the curve, and the number stops meaning what it says.
 `rsna_holdout.py` locks itself after the first pass, so in this repository it
 will refuse to run.
 
-### Hardware, and why it appears in a README
+### Hardware constraints
 
 A Radeon RX 5500 XT. RDNA1, so no CUDA and no ROCm, which leaves `torch-directml`
 over DirectX 12. No mixed precision, batch size 16, DataLoader workers disabled
@@ -893,10 +941,11 @@ a fourteen-hour follow-up run three times without spending it.
   where all three readers agreed it reaches 0.849, on single opinions 0.669, and
   two individual readers differ from each other by 0.122. It is not possible to
   say from these numbers how much is the model and how much is the label.
-- The label definition for the VinDr run was changed after the result was known,
-  from "one reader suffices" to a majority of readers. Both numbers are reported
-  side by side and the pre-registered gate stands as failed. The majority rule is
-  pre-registered for the next external set rather than applied backwards.
+- After examining the prespecified binary target structure—pneumonia versus no
+  pneumonia—a more plausible majority rule was added for VinDr: at least two of
+  three readers must identify the finding. This decision was made after the first
+  result was known, so it remains a post-hoc analysis. Both definitions are
+  reported side by side, and the prespecified gate remains failed.
 - A blinded re-read of the disputed cases was attempted and did not settle them.
   Its two control groups separated at p = 0.066, which means the read was not
   sharp enough to interpret. This is recorded because the controls are what
