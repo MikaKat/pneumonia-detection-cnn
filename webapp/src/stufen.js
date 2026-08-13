@@ -133,10 +133,9 @@ export const TEXTE = {
     ton: "low",
     stern: () => {
       const s = spanne("low");
-      return `Between ${Math.round(s.min * 100)} and ${Math.round(s.max * 100)} ` +
-        `pneumonias in 100 land here. Measured on three datasets, not estimated. ` +
-        `Which end of that range applies depends on who sends the images, and ` +
-        `this page cannot tell.`;
+      return `${Math.round(s.min * 100)} to ${Math.round(s.max * 100)} ` +
+        `pneumonias in 100 land here. Measured on three datasets, and which ` +
+        `end applies depends on who sends the images.`;
     },
   },
   [STUFE.UNKLAR]: {
@@ -145,11 +144,11 @@ export const TEXTE = {
     ton: "mid",
     stern: () => {
       const s = spanne("mid");
-      return `This tier makes no statement, and it is not small: it held ` +
-        `between ${Math.round(GEMESSEN[1].mid.anteil * 100)} and ` +
-        `${Math.round(GEMESSEN[2].mid.anteil * 100)} percent of all images, ` +
-        `of which ${Math.round(s.min * 100)} to ${Math.round(s.max * 100)} ` +
-        `percent had the finding.`;
+      return `No statement, and not a rare outcome: ` +
+        `${Math.round(GEMESSEN[1].mid.anteil * 100)} to ` +
+        `${Math.round(GEMESSEN[2].mid.anteil * 100)} percent of images land ` +
+        `here, of which ${Math.round(s.min * 100)} to ` +
+        `${Math.round(s.max * 100)} percent had the finding.`;
     },
   },
   [STUFE.AUFFAELLIG]: {
@@ -158,10 +157,9 @@ export const TEXTE = {
     ton: "high",
     stern: () => {
       const s = spanne("high");
-      return `The one tier that held up everywhere: ` +
-        `${Math.round(s.min * 100)} to ${Math.round(s.max * 100)} of 100 images ` +
-        `here had the finding, across three populations. It is also rare, ` +
-        `reaching only ${Math.round(GEMESSEN[1].high.anteil * 100)} to ` +
+      return `${Math.round(s.min * 100)} to ${Math.round(s.max * 100)} of 100 ` +
+        `images here had the finding, on all three datasets. It is also the ` +
+        `rare tier, reaching ${Math.round(GEMESSEN[1].high.anteil * 100)} to ` +
         `${Math.round(GEMESSEN[0].high.anteil * 100)} percent of images.`;
     },
   },
@@ -171,8 +169,6 @@ export const TEXTE = {
 export const SENS_ZUSAGE = {
   ziel: 0.9,
   satz:
-    "The lower threshold was set for 90 % sensitivity on the development data. " +
-    "It reached 95 % on Kermany and 81 % on VinDr. A sensitivity figure is a " +
-    "statement about a population, not about a model, which is why the three " +
-    "are named rather than averaged.",
+    "That 90 % became 95 % on Kermany and 81 % on VinDr, because a " +
+    "sensitivity figure describes a population and not a model.",
 };

@@ -62,10 +62,20 @@ body {
   outline-offset: 2px;
 }
 
+/* 1200px, not 760. The result card puts the numbers and the maps side by side
+   from 1000px up, and at 760 each column would be too narrow to hold a
+   readable line. Everything that is running text keeps its own measure below,
+   so the wider page does not produce 130-character lines. */
 .app {
-  max-width: 760px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 0 16px 48px;
+}
+
+.subtitle,
+.app-footer p,
+.disclaimer-banner {
+  max-width: 68ch;
 }
 
 /* Headings and short labels break on meaning, longer copy avoids orphans.
@@ -514,23 +524,107 @@ figcaption,
   }
 }
 
+/* ---------- result: the two-column grid ---------- */
+/* Numbers left, maps right, measured limits underneath across both. The
+   breakpoint is 1000px because below it the map column falls under the 420px
+   the heatmap needs and the left column drops under a readable measure. */
+.result-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 22px;
+}
+@media (min-width: 1000px) {
+  .result-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 28px;
+    align-items: start;
+  }
+  /* A hairline between the columns instead of a gap alone, so the two halves
+     read as two answers rather than as one wrapped block. */
+  .result-grid > .result-col + .result-col {
+    padding-left: 28px;
+    border-left: 1px solid var(--border);
+  }
+}
+.result-col {
+  min-width: 0;
+}
+
+/* The small caps line above a block, naming what kind of output it is. It
+   exists because the prevalence control moves one number and not its
+   neighbour, and the label is cheaper than a paragraph explaining that. */
+.block-eyebrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  margin: 0 0 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.block-eyebrow-note {
+  font-size: 0.68rem;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+
 /* ---------- result: score with its spread ---------- */
 /* No red/green verdict box here, and none of the styles for one. A colour-coded
    yes/no would restate in the layout the claim the text refuses to make. */
-.score-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
+.score {
+  margin-top: 16px;
 }
-.score-label {
+/* Two cells side by side: the probability, which the control below moves, and
+   the likelihood ratio, which it does not. Standing next to each other they
+   make that difference visible without a sentence about it. */
+.score-duo {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.score-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+.score-cell--fixed {
+  background: var(--panel-2);
+}
+.score-cell-label {
+  font-size: 0.75rem;
   font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.score-cell-foot {
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--muted);
 }
 .score-value {
   font-size: 2rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
+}
+.score-cell--fixed .score-value {
+  font-size: 1.6rem;
+}
+@media (max-width: 380px) {
+  .score-duo {
+    grid-template-columns: 1fr;
+  }
 }
 .score-track {
   position: relative;
@@ -618,8 +712,52 @@ figcaption,
   border-bottom: 1px solid var(--border);
   font-variant-numeric: tabular-nums;
 }
+/* A folded-away explanation. Every long derivation on this page lives in one
+   of these, so the card carries a sentence per point and the reasoning is one
+   click away instead of three paragraphs down. */
+.more {
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.more > summary {
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  transition: color 120ms ease-out;
+}
+.more > summary::-webkit-details-marker {
+  display: none;
+}
+.more > summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 140ms var(--ease-out);
+}
+.more[open] > summary::before {
+  transform: rotate(90deg);
+}
+.more > summary:hover {
+  color: var(--text);
+}
+.more > p {
+  margin: 6px 0 0;
+  max-width: 62ch;
+}
+
 .honesty {
-  margin-top: 16px;
+  margin-top: 22px;
   padding: 12px 14px;
   background: var(--warn-bg);
   border: 1px solid var(--warn-border);
@@ -633,9 +771,33 @@ figcaption,
 .honesty p:last-child {
   margin-bottom: 0;
 }
+.honesty-lead {
+  max-width: 78ch;
+}
+/* The two folded blocks sit side by side once there is room, so the yellow box
+   ends on one row of summaries rather than a stack. */
+.honesty-more {
+  display: grid;
+  gap: 4px 28px;
+  margin-top: 10px;
+}
+@media (min-width: 800px) {
+  .honesty-more {
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+  }
+}
+.honesty .more,
+.honesty .more > summary {
+  color: var(--warn-text);
+  opacity: 0.9;
+}
+.honesty .more > summary:hover {
+  opacity: 1;
+}
 
 .heatmap-area {
-  margin-top: 16px;
+  margin-top: 0;
 }
 /* Zwei Schaltflaechen in einer Bahn, nicht zwei lose Knoepfe: die beiden Karten
    zeigen dieselbe Flaeche, und der Umschalter soll aussehen wie eine Wahl
@@ -645,7 +807,7 @@ figcaption,
 .map-switch {
   display: flex;
   gap: 4px;
-  max-width: 420px;
+  max-width: 480px;
   margin: 0 auto 10px;
   padding: 4px;
   background: var(--panel-2);
@@ -694,7 +856,7 @@ figcaption,
 .heatmap-stack {
   position: relative;
   width: 100%;
-  max-width: 420px;
+  max-width: 480px;
   margin: 0 auto;
   aspect-ratio: 1 / 1;
   background: #000;
@@ -724,7 +886,7 @@ figcaption,
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-width: 420px;
+  max-width: 480px;
   margin: 10px auto 0;
   font-size: 0.85rem;
   color: var(--muted);
@@ -785,10 +947,13 @@ figcaption,
    centred prose gives every line a different start point to find. It keeps the
    420px measure of the image above it, so the block still reads as its caption. */
 .heatmap-caption {
-  max-width: 420px;
+  max-width: 480px;
   margin: 10px auto 0;
   text-align: left;
   font-size: 0.82rem;
+}
+.heatmap-caption p {
+  margin: 0;
 }
 .result-footer {
   display: flex;

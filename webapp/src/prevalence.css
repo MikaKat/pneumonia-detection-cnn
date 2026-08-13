@@ -215,6 +215,15 @@
   .tier-table th:nth-child(2), .tier-table td:nth-child(2) { display: none; }
 }
 
+/* From 40rem up the three tier columns hold their two lines and stop wrapping
+   mid-figure. Without this the dataset name takes every pixel it can get and
+   "36% of images" breaks across three lines next to it. */
+@media (min-width: 40rem) {
+  .tier-table td:first-child { width: 34%; }
+  .tier-table th:not(:first-child),
+  .tier-table td:not(:first-child) { white-space: nowrap; }
+}
+
 /* Zwei Schwellenmarken statt einer (13.08.2026).
    Die untere ist die leisere: sie sagt "darunter faellt der Ausschluss", und
    das ist die Stelle, an der ein Fehler teuer wird. Die obere darf lauter
