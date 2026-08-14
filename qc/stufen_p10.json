@@ -1,76 +1,96 @@
 {
   "t_low": 0.1368481908525916,
-  "t_high": 0.559134948529309,
+  "t_high": 0.4282483302355137,
   "quelle": "22872 Entwicklungsbilder, out of fold",
-  "dev": {
-    "n": 22872,
-    "praevalenz": 0.22534102833158448,
-    "unauffaellig": {
-      "anteil": 0.5164393144456103,
-      "davon_krank": 0.043684388757196074
-    },
-    "unklar": {
-      "anteil": 0.3568555438964673,
-      "davon_krank": 0.3217348689046802
-    },
-    "auffaellig": {
-      "anteil": 0.12670514165792235,
-      "davon_krank": 0.694271911663216
-    },
-    "sens_bei_t_low": 0.89988358556461,
-    "spez_bei_t_low": 0.6375437408285359,
-    "bei_t_low": {
-      "sens": 0.89988358556461,
-      "spez": 0.6375437408285359,
-      "ppv": 0.4193490054249548,
-      "npv": 0.956315611242804
-    },
-    "bei_t_high": {
-      "sens": 0.39037640667442763,
-      "spez": 0.9499943560221243,
-      "ppv": 0.694271911663216,
-      "npv": 0.8426955041554021
-    }
-  },
-  "kermany": {
-    "n": 5856,
-    "praevalenz": 0.7296789617486339,
-    "unauffaellig": {
-      "anteil": 0.22199453551912568,
-      "davon_krank": 0.17846153846153845
-    },
-    "unklar": {
-      "anteil": 0.7488046448087432,
-      "davon_krank": 0.8825541619156214
-    },
-    "auffaellig": {
-      "anteil": 0.02920081967213115,
-      "davon_krank": 1.0
-    },
-    "sens_bei_t_low": 0.9457055932600047,
-    "spez_bei_t_low": 0.6746683512318383
-  },
-  "vindr": {
-    "n": 15000,
-    "praevalenz": 0.10586666666666666,
-    "unauffaellig": {
-      "anteil": 0.7421333333333333,
-      "davon_krank": 0.03961552281710384
-    },
-    "unklar": {
-      "anteil": 0.2428,
-      "davon_krank": 0.2616694124107633
-    },
-    "auffaellig": {
-      "anteil": 0.015066666666666667,
-      "davon_krank": 0.8584070796460177
-    },
-    "sens_bei_t_low": 0.7222921914357683,
-    "spez_bei_t_low": 0.7971219803161348
-  },
   "ziele": {
-    "t_low": "Sensitivitaet 90 %",
-    "t_high": "Spezifitaet 95 %",
-    "festgelegt": "vor der Rechnung, siehe erklaerungen/41_stufen_statt_verdikt.md"
+    "t_low": "Sensitivitaet 90%",
+    "t_high": "Spezifitaet 90%",
+    "festgelegt": "erklaerungen/41_stufen_statt_verdikt.md, obere Schwelle geaendert in erklaerungen/46_obere_schwelle.md"
+  },
+  "datensaetze": {
+    "rsna": {
+      "n": 22872,
+      "praevalenz": 0.22534102833158448,
+      "low": {
+        "anteil": 0.5164393144456103,
+        "krank": 0.043684388757196074,
+        "n": 11812,
+        "n_krank": 516
+      },
+      "mid": {
+        "anteil": 0.27885624344176285,
+        "krank": 0.270931326434619,
+        "n": 6378,
+        "n_krank": 1728
+      },
+      "high": {
+        "anteil": 0.20470444211262678,
+        "krank": 0.6215292609995728,
+        "n": 4682,
+        "n_krank": 2910
+      },
+      "sens": 0.89988358556461,
+      "spez_bei_t_high": 0.8999887120442488,
+      "name": "RSNA development set",
+      "was": "adults and children, US emergency departments",
+      "heimat": true,
+      "quelle": "predictions_final_model/rsna_f*_s0.csv + Platt"
+    },
+    "vindr": {
+      "n": 15000,
+      "praevalenz": 0.05586666666666667,
+      "low": {
+        "anteil": 0.7421333333333333,
+        "krank": 0.014552641034854473,
+        "n": 11132,
+        "n_krank": 162
+      },
+      "mid": {
+        "anteil": 0.2198,
+        "krank": 0.11343645738550197,
+        "n": 3297,
+        "n_krank": 374
+      },
+      "high": {
+        "anteil": 0.038066666666666665,
+        "krank": 0.5288966725043783,
+        "n": 571,
+        "n_krank": 302
+      },
+      "sens": 0.8066825775656324,
+      "spez_bei_t_high": 0.9810055076966531,
+      "name": "VinDr-CXR",
+      "was": "adults, Vietnam, two of three radiologists",
+      "heimat": false,
+      "quelle": "predictions_extern_vindr/extern_vindr_ens_M.csv"
+    },
+    "kermany": {
+      "n": 5856,
+      "praevalenz": 0.7296789617486339,
+      "low": {
+        "anteil": 0.22199453551912568,
+        "krank": 0.17846153846153845,
+        "n": 1300,
+        "n_krank": 232
+      },
+      "mid": {
+        "anteil": 0.6702527322404371,
+        "krank": 0.8687898089171975,
+        "n": 3925,
+        "n_krank": 3410
+      },
+      "high": {
+        "anteil": 0.10775273224043716,
+        "krank": 1.0,
+        "n": 631,
+        "n_krank": 631
+      },
+      "sens": 0.9457055932600047,
+      "spez_bei_t_high": 1.0,
+      "name": "Kermany",
+      "was": "children aged one to five, Guangzhou",
+      "heimat": false,
+      "quelle": "predictions_extern_kermany/extern_kermany_ens.csv"
+    }
   }
 }

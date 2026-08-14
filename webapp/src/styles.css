@@ -853,6 +853,15 @@ figcaption,
     flex-direction: column;
   }
 }
+/* The yardstick for the two numbers on the buttons above. Without it "0.91"
+   and "0.73" read as percentages of something. */
+.map-scale-note {
+  max-width: 480px;
+  margin: 0 auto 10px;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
 .heatmap-stack {
   position: relative;
   width: 100%;

@@ -23,12 +23,25 @@
 // the 22872 out of fold DEVELOPMENT predictions alone:
 //
 //   t_low   sensitivity 90 %   ruling out    -> below it: "unremarkable"
-//   t_high  specificity 95 %   ruling in     -> above it: "suspicious"
+//   t_high  specificity 90 %   ruling in     -> above it: "suspicious"
 //   between                                  -> "unclear", no statement
 //
 // The spent holdout was not touched. Kermany and VinDr never entered the
 // choice either, which is what makes the external figures below unbiased for
 // exactly these thresholds rather than a second look at a used set.
+//
+// THE UPPER TARGET WAS 95 % UNTIL 13.08.2026, AND THE CHANGE IS POST HOC.
+// At 95 % specificity the middle tier held 36 % of all images, which is a lot
+// of screen time for "no statement". Lowering the target to 90 % moves it to
+// 28 % and roughly doubles how many pneumonias the top tier catches, at the
+// price of a weaker top tier: 62 % of the images in it have pneumonia instead
+// of 69 %, and on VinDr that figure drops from 69 % to 53 %. The new threshold
+// still comes only from the development data, but the REASON for changing it
+// was the finished display, so it is a decision made with the distribution in
+// view. Protocol in erklaerungen/46_obere_schwelle.md; the lower threshold was
+// deliberately left alone, because that is the one where a mistake is
+// expensive. Both numbers below are produced by
+// rsna/befunde/rsna_stufen_tabelle.py and must not be edited by hand.
 //
 // THE MISS RATES ARE MEASURED, NOT COMPUTED, AND THAT IS THE POINT
 // ----------------------------------------------------------------
@@ -42,7 +55,7 @@
 // be false.
 
 export const T_LOW = 0.1368481908525916;
-export const T_HIGH = 0.559134948529309;
+export const T_HIGH = 0.4282483302355137;
 
 export const STUFE = { UNAUFFAELLIG: "low", UNKLAR: "mid", AUFFAELLIG: "high" };
 
@@ -74,8 +87,8 @@ export const GEMESSEN = [
     n: 22872,
     praevalenz: 0.2253,
     low: { anteil: 0.5164, krank: 0.0437 },
-    mid: { anteil: 0.3569, krank: 0.3217 },
-    high: { anteil: 0.1267, krank: 0.6943 },
+    mid: { anteil: 0.2789, krank: 0.2709 },
+    high: { anteil: 0.2047, krank: 0.6215 },
     sens: 0.8999,
     heimat: true,
   },
@@ -94,8 +107,8 @@ export const GEMESSEN = [
     n: 15000,
     praevalenz: 0.0559,
     low: { anteil: 0.7421, krank: 0.0146 },
-    mid: { anteil: 0.2428, krank: 0.1425 },
-    high: { anteil: 0.0151, krank: 0.6947 },
+    mid: { anteil: 0.2198, krank: 0.1134 },
+    high: { anteil: 0.0381, krank: 0.5289 },
     sens: 0.8067,
     heimat: false,
   },
@@ -106,8 +119,8 @@ export const GEMESSEN = [
     n: 5856,
     praevalenz: 0.7297,
     low: { anteil: 0.2220, krank: 0.1785 },
-    mid: { anteil: 0.7488, krank: 0.8826 },
-    high: { anteil: 0.0292, krank: 1.0 },
+    mid: { anteil: 0.6703, krank: 0.8688 },
+    high: { anteil: 0.1078, krank: 1.0 },
     sens: 0.9457,
     heimat: false,
   },

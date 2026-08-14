@@ -325,26 +325,36 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
 
         <div className="result-col heatmap-area">
           {bothMaps && (
-            <div className="map-switch" role="tablist" aria-label="Which map to show">
-              <button
-                role="tab"
-                aria-selected={map === "head"}
-                className={"map-tab" + (map === "head" ? " map-tab--active" : "")}
-                onClick={() => setMap("head")}
-              >
-                Where the model points
-                <span className="map-tab-sub">localisation head &middot; 0.91</span>
-              </button>
-              <button
-                role="tab"
-                aria-selected={map === "cam"}
-                className={"map-tab" + (map === "cam" ? " map-tab--active" : "")}
-                onClick={() => setMap("cam")}
-              >
-                What the score came from
-                <span className="map-tab-sub">Grad-CAM &middot; 0.73</span>
-              </button>
-            </div>
+            <>
+              <div className="map-switch" role="tablist" aria-label="Which map to show">
+                <button
+                  role="tab"
+                  aria-selected={map === "head"}
+                  className={"map-tab" + (map === "head" ? " map-tab--active" : "")}
+                  onClick={() => setMap("head")}
+                >
+                  Where the model points
+                  <span className="map-tab-sub">localisation head &middot; AUC 0.91</span>
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={map === "cam"}
+                  className={"map-tab" + (map === "cam" ? " map-tab--active" : "")}
+                  onClick={() => setMap("cam")}
+                >
+                  What the score came from
+                  <span className="map-tab-sub">Grad-CAM &middot; AUC 0.73</span>
+                </button>
+              </div>
+              {/* The two numbers on the buttons were bare until 13.08.2026 and
+                  read as percentages. They are point AUC against the
+                  radiologist boxes, and without the 0.75 of the fixed template
+                  next to them neither figure can be judged. */}
+              <p className="map-scale-note">
+                Both figures are point AUC against the radiologist boxes. A fixed
+                template that never looks at the image scores 0.75.
+              </p>
+            </>
           )}
 
           <div className="heatmap-stack">
@@ -381,9 +391,9 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
             <div className="heatmap-caption">
               <p className="muted">
                 The second output of the same network, a 14x14 field trained
-                against radiologist boxes. Against those boxes it reaches{" "}
-                <strong>0.91</strong>, where Grad-CAM reaches 0.73 and a fixed
-                template that never looks at the image reaches 0.75.
+                against radiologist boxes. It is the better of the two pointers
+                by a wide margin, and it does <strong>not</strong> feed the
+                score.
               </p>
               <details className="more">
                 <summary>How to read it</summary>
@@ -408,13 +418,12 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
               <details className="more">
                 <summary>How to read it</summary>
                 <p>
-                  As a pointer it is weak: <strong>0.73</strong> against the
-                  radiologist boxes, below the 0.75 of a fixed template that
-                  ignores the image entirely. Expect a diffuse blob rather than
-                  a sharp finding. Measurements in this project showed the
-                  evidence the model uses is spread out and partly outside the
-                  lungs, so read it as a plausibility check on the model rather
-                  than as a marked lesion.
+                  As a pointer it is weak, and it lands <em>below</em> the fixed
+                  template that ignores the image entirely. Expect a diffuse
+                  blob rather than a sharp finding. Measurements in this project
+                  showed the evidence the model uses is spread out and partly
+                  outside the lungs, so read it as a plausibility check on the
+                  model rather than as a marked lesion.
                 </p>
               </details>
             </div>
@@ -467,9 +476,16 @@ export function ResultView({ result, stages = [], originalUrl, onReset }) {
             <p>
               Not from Youden, which maximises a statistic and answers no
               clinical question. {pct(T_LOW)}% was fixed for 90 % sensitivity to
-              rule out and {pct(T_HIGH)}% for 95 % specificity to rule in, both
+              rule out and {pct(T_HIGH)}% for 90 % specificity to rule in, both
               on the 22 872 development images and on nothing else.{" "}
               {SENS_ZUSAGE.satz}
+            </p>
+            <p>
+              The upper target was 95 % until 13.08.2026, which left 36 % of all
+              images in the middle tier. It was lowered after seeing that, so it
+              is a choice made with the distribution in view even though the
+              threshold itself still comes from the development data alone. The
+              lower one was left untouched.
             </p>
           </details>
           <details className="more">
